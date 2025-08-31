@@ -11,8 +11,6 @@ async def main():
 
     if not light_IP1 or not light_IP2:
         raise ValueError("Light IP addresses not found in environment variables.")
-
-
     light1 = wizlight(light_IP1)
     light2 = wizlight(light_IP2)
 
