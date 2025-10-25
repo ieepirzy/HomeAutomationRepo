@@ -1,0 +1,8 @@
+services:
+  wiz:
+    build: ./wiz
+    container_name: wiz_service
+    env_file:
+      - ./wiz/.env
+    ports:
+      - "5000:5000"
