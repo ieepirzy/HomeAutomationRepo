@@ -18,7 +18,7 @@ services:
       Tv_IP: ${LG_TV_IP}
       CLIENT_KEY: ${LG_CLIENT_KEY}
     ports:
-     - "5000:5000"
+     - "5100:5000"
      
   appletv:
     build: ./appletv
@@ -28,4 +28,4 @@ services:
       ATV_IP: ${ATV_IP}
       ATV_CRED: ${ATV_CREDENTIAL}
     ports:
-     - "5000:5000"
+     - "5200:5000"
