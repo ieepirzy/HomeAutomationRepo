@@ -8,7 +8,7 @@ services:
       lightIP1: ${WIZ_IP_1}
       lightIP2: ${WIZ_IP_2}
     ports:
-      - "5000:5000"
+      - "5100:5000"
       
   webostv:
     build: ./lgtv
@@ -18,7 +18,7 @@ services:
       Tv_IP: ${LG_TV_IP}
       CLIENT_KEY: ${LG_CLIENT_KEY}
     ports:
-     - "5100:5000"
+     - "5200:5000"
      
   appletv:
     build: ./appletv
@@ -28,4 +28,4 @@ services:
       ATV_IP: ${ATV_IP}
       ATV_CRED: ${ATV_CREDENTIAL}
     ports:
-     - "5200:5000"
+     - "5300:5000"
