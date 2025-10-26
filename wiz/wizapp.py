@@ -5,7 +5,7 @@ import os
 from dotenv import load_dotenv
 
 app = Flask(__name__)
-load_dotenv()
+#load_dotenv() <-Use for local testing only
 light_IP1 = os.getenv("lightIP1")
 light_IP2 = os.getenv("lightIP2")
 

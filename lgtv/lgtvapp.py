@@ -5,7 +5,7 @@ import os
 from pprint import pprint
 
 async def main():
-    load_dotenv()
+    #load_dotenv() <-For local testing only
 
     tv_ip = os.getenv("Tv_IP")
     clientKey = os.getenv("CLIENT_KEY")
