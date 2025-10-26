@@ -17,4 +17,4 @@ COPY . .
 EXPOSE 5000
 
 # 7. Define the default command
-CMD ["python", "main.py"]
+CMD ["python", "wizapp.py"]
