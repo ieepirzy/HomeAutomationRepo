@@ -6,3 +6,17 @@ services:
       - ./wiz/.env
     ports:
       - "5000:5000"
+  webostv:
+    build: ./lgtv
+    container_name: lgtv_service
+    env_file:
+      - ./lgtv/.env
+    ports:
+     - "5000:5000"
+  appletv:
+    build: ./appletv
+    container_name: appletv_service
+    env_file:
+      - ./appletv/.env
+    ports:
+     - "5000:5000"
