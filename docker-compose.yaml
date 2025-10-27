@@ -29,3 +29,7 @@ services:
       ATV_CRED: ${ATV_CREDENTIAL}
     ports:
      - "5300:5000"
+networks:
+  default:
+    external: 
+      name: shared_net
