@@ -35,3 +35,7 @@ services:
     container_name: sunrise-alarm
     restart: "no"  # since it's supposed to run once and exit
     command: ["python", "app.py"]
+networks:
+  default:
+    external: 
+      name: shared_net
