@@ -10,3 +10,5 @@ services:
      AUTH_TOKEN: ${AUTH_TOKEN}
     restart: "no"  # since it's supposed to run once and exit
     command: ["python", "app.py"]
+    ports:
+      - "5000:5000"   # host:container
