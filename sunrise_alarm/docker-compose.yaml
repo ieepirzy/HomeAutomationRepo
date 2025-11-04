@@ -1,0 +1,10 @@
+version: "3.9"
+
+services:
+  sunrise-alarm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sunrise-alarm
+    restart: "no"  # since it's supposed to run once and exit
+    command: ["python", "app.py"]

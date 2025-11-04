@@ -1,0 +1,7 @@
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+# run once and exit; schedule container run via host cron or Portainer stack scheduler
+CMD ["python", "app.py"]

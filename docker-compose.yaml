@@ -29,3 +29,9 @@ services:
       ATV_CRED: ${ATV_CREDENTIAL}
     ports:
      - "5300:5000"
+  
+  sunrise-alarm:
+    build: ./sunrise_alarm
+    container_name: sunrise-alarm
+    restart: "no"  # since it's supposed to run once and exit
+    command: ["python", "app.py"]
