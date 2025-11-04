@@ -6,5 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: sunrise-alarm
+    environment:
+     AUTH_TOKEN: ${AUTH_TOKEN}
     restart: "no"  # since it's supposed to run once and exit
     command: ["python", "app.py"]
