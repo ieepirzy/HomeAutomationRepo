@@ -1,0 +1,67 @@
+# Home Assistant core configuration.
+#
+# Deliberately thin. Everything specific to the wake-up protocol lives in
+# packages/wakeup_protocol.yaml so it stays grouped and easy to review as
+# one unit — see docs/wakeup-protocol.md "Configuration model".
+#
+# Integration provisioning model (see docs/wakeup-protocol.md for the full
+# rationale): device/service integrations that need OAuth or interactive
+# pairing (Apple TV, Google Calendar, weather, the Companion App itself)
+# are set up through the UI after first boot and persist in
+# /config/.storage, which is bind-mounted from ./data/ — outside git, but
+# durable across Portainer Git redeploys. Everything that can be expressed
+# declaratively (helpers, automations, scripts, templates, dashboards) is
+# committed to git instead of created via the UI, so it survives a full
+# volume wipe and is reviewable in PRs.
+
+homeassistant:
+  name: Home
+  latitude: !secret home_latitude
+  longitude: !secret home_longitude
+  elevation: 0
+  unit_system: metric
+  currency: EUR
+  time_zone: Europe/Helsinki
+  country: FI
+  packages: !include_dir_named packages
+
+# Enables the standard set of built-in integrations (energy, backup,
+# updater, person, zone, mobile_app support, etc.) without listing each
+# one by hand.
+default_config:
+
+http:
+  server_port: 8123
+  # network_mode: host means HA sees real client IPs directly; no
+  # reverse proxy is assumed. If one is added later, set
+  # use_x_forwarded_for + trusted_proxies here.
+
+recorder:
+  db_url: sqlite:////config/data/home-assistant_v2.db
+  purge_keep_days: 30
+  commit_interval: 5
+
+logger:
+  default: warning
+  logs:
+    custom_components.wakeup_protocol: info
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+# Adds the wake-up dashboard alongside the normal UI-managed default
+# dashboard — this does NOT switch the default dashboard to YAML mode,
+# only this named one.
+lovelace:
+  dashboards:
+    wakeup-protocol:
+      mode: yaml
+      title: Wake-Up Protocol
+      icon: mdi:sleep-off
+      show_in_sidebar: true
+      filename: dashboards/wakeup.yaml
+
+# Long-lived tokens, coordinates, and the briefing service's shared secret
+# live in secrets.yaml (gitignored). See secrets.yaml.example for the
+# expected keys and how to populate them.
