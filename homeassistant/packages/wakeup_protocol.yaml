@@ -1,0 +1,1350 @@
+# =============================================================================
+# Zero-Willpower Wake-Up Protocol — Home Assistant package
+# =============================================================================
+#
+# Everything for the wake-up subsystem lives here: helpers, the state
+# machine, lighting, the alarm adapter, the charger interlock, briefing
+# orchestration, metrics/streaks, restart safety, and test mode.
+#
+# Read docs/wakeup-protocol.md before touching this file — it documents
+# the Apple Watch wake-detection reality, the phone-alarm mechanism and
+# its Watch-dismissal limitation, and every deliberate simplification
+# below. This file assumes you have completed the one-time iOS setup
+# (Shortcuts + Personal Automations) documented there.
+#
+# REPLACE-BEFORE-USE markers below point at the handful of values that are
+# specific to Ila's devices and cannot be discovered automatically.
+#
+# State machine (see docs for the full diagram):
+#   idle -> waking -> waiting_for_phone_undock -> up -> complete
+#                                   |
+#                                   +-- (success window exceeded) --> late_wake
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------
+# Helpers — live state. See docs/wakeup-protocol.md "Metrics" for why the
+# 7-day/30-day rollups are implemented as `sensor` (statistics platform)
+# entities instead of the input_number the spec doc suggests: they are
+# derived from history, not directly settable, so a plain input_number
+# would be a second, driftable source of truth for the same data the
+# recorder already has.
+# -----------------------------------------------------------------------
+
+# None of the helpers below set `initial:`. Home Assistant's input_*
+# helpers only restore their last value across a restart when `initial`
+# is OMITTED — if it's set, the entity is force-reset to that value on
+# every single restart, not just the first-ever one, silently discarding
+# whatever the user (or an automation) had set. That's actively wrong for
+# almost everything in this package: it defeated skip_next (a user
+# setting made before bed, wiped by a Portainer redeploy overnight), and
+# it made the restart-recovery automation below unreachable in practice
+# (ila_wake_state was being force-reset to "idle" before that automation
+# ever got a chance to see whatever state a crash had left it in). See
+# docs/wakeup-protocol.md "Restart safety" for the full explanation.
+#
+# Omitting `initial` still needs a sane first-ever-boot value, which
+# doesn't come from this key — see the `ila_wakeup_startup_init`
+# automation below, which applies defaults only when the current value
+# is genuinely unset (unknown/unavailable), never unconditionally.
+input_boolean:
+  ila_wake_protocol_enabled:
+    name: "Wake Protocol Enabled"
+    icon: mdi:power
+  ila_wake_protocol_test_mode:
+    name: "Wake Protocol Test Mode"
+    icon: mdi:test-tube
+  ila_wake_protocol_skip_next:
+    name: "Wake Protocol Skip Next"
+    icon: mdi:skip-next
+  ila_wake_protocol_emergency_stop:
+    name: "Wake Protocol Emergency Stop"
+    icon: mdi:stop-circle
+  ila_defaults_applied:
+    name: "Wake Protocol Defaults Applied (internal)"
+    icon: mdi:cog-outline
+    # Gates the one-time-only default-application logic in
+    # ila_wakeup_startup_init. Relying on this rather than checking
+    # whether the tunables/wake-window helpers are "unknown" avoids
+    # depending on exactly what input_number/input_datetime fall back to
+    # on a true first boot with no `initial:` and no restored state —
+    # that fallback isn't clearly documented, whereas input_boolean's own
+    # no-initial/no-restore fallback (False) is unambiguous and is
+    # already relied on everywhere else in this file.
+
+input_select:
+  ila_wake_state:
+    name: "Wake State"
+    icon: mdi:sleep
+    options:
+      - idle
+      - waking
+      - waiting_for_phone_undock
+      - up
+      - complete
+      - late_wake
+      - error
+    # No `initial:` (see the note above the input_boolean block). Home
+    # Assistant's own fallback when there's no restored state AND no
+    # initial is the first item in `options`, which is "idle" — so a
+    # genuine first-ever boot behaves identically to before.
+
+input_datetime:
+  ila_last_wake_detected:
+    name: "Last Wake Detected"
+    has_date: true
+    has_time: true
+  ila_last_phone_undocked:
+    name: "Last Phone Undocked"
+    has_date: true
+    has_time: true
+  ila_last_successful_wake_date:
+    name: "Last Successful Wake Date"
+    has_date: true
+    has_time: false
+  ila_wake_window_start:
+    name: "Wake Window Start"
+    has_date: false
+    has_time: true
+  ila_wake_window_end:
+    name: "Wake Window End"
+    has_date: false
+    has_time: true
+
+input_number:
+  # --- Session metrics (most recent session only — see the statistics
+  # sensors below for rolling windows) ---
+  ila_launch_latency_seconds:
+    name: "Launch Latency Seconds"
+    min: 0
+    max: 7200
+    step: 1
+    mode: box
+  ila_wake_success_flag:
+    name: "Wake Success Flag (internal)"
+    min: 0
+    max: 1
+    step: 1
+    mode: box
+  ila_current_wake_streak:
+    name: "Current Wake Streak"
+    min: 0
+    max: 100000
+    step: 1
+    mode: box
+  ila_best_wake_streak:
+    name: "Best Wake Streak"
+    min: 0
+    max: 100000
+    step: 1
+    mode: box
+  ila_briefing_generation_duration_seconds:
+    name: "Briefing Generation Duration Seconds"
+    min: 0
+    max: 600
+    step: 1
+    mode: box
+
+  # --- Tunables (section 18 of the spec) ---
+  # Deliberately no `initial:` here either — these are meant to be
+  # dashboard-adjustable and stay adjusted across restarts (see the note
+  # above the input_boolean block). Sane first-boot defaults are applied
+  # once by ila_wakeup_startup_init below, not baked in here — input_number's
+  # own no-initial/no-restore fallback is `min`, which would be a bad
+  # default for e.g. alarm_timeout_minutes (5) or light_brightness_pct (1).
+  ila_wake_success_window_minutes:
+    name: "Wake Success Window Minutes"
+    min: 1
+    max: 60
+    step: 1
+    mode: box
+  ila_light_transition_seconds:
+    name: "Wake Light Transition Seconds"
+    min: 1
+    max: 120
+    step: 1
+    mode: box
+  ila_light_brightness_pct:
+    name: "Wake Light Brightness Percent"
+    min: 1
+    max: 100
+    step: 1
+    mode: box
+  ila_briefing_timeout_seconds:
+    name: "Briefing Timeout Seconds"
+    min: 10
+    max: 300
+    step: 5
+    mode: box
+  ila_alarm_timeout_minutes:
+    name: "Alarm Timeout Minutes"
+    min: 5
+    max: 120
+    step: 5
+    mode: box
+
+input_text:
+  ila_active_wake_session_id:
+    name: "Active Wake Session ID"
+    max: 100
+  ila_last_processed_session_id:
+    name: "Last Processed Session ID (metrics dedupe)"
+    max: 100
+  ila_last_playback_session_id:
+    name: "Last Playback Session ID (briefing dedupe)"
+    max: 100
+  ila_briefing_status:
+    name: "Briefing Status"
+    max: 30
+  ila_briefing_audio_url:
+    name: "Briefing Audio URL"
+    max: 255
+  ila_briefing_text:
+    name: "Briefing Text"
+    max: 2000
+  ila_alarm_status:
+    name: "Alarm Status"
+    max: 30
+  ila_wake_trigger_source:
+    name: "Wake Trigger Source"
+    max: 50
+  ila_undock_trigger_source:
+    name: "Undock Trigger Source"
+    max: 50
+  ila_briefing_ready_webhook_id:
+    name: "Briefing Ready Webhook ID (internal)"
+    max: 100
+  ila_todays_priorities:
+    name: "Today's Priorities"
+    icon: mdi:format-list-checks
+    max: 255
+
+# -----------------------------------------------------------------------
+# Rolling metrics — derived from the recorder history of the input_number
+# helpers above. One state write per calendar day (see the completion and
+# timeout automations below), so `mean` over a max_age window is exactly
+# the rolling average / success rate the spec asks for, at zero extra
+# storage cost beyond what HA's recorder already keeps.
+# -----------------------------------------------------------------------
+
+sensor:
+  - platform: statistics
+    name: "Ila 7d Average Wake Latency"
+    unique_id: ila_7d_average_wake_latency
+    entity_id: input_number.ila_launch_latency_seconds
+    state_characteristic: mean
+    max_age:
+      days: 7
+  - platform: statistics
+    name: "Ila 30d Wake Success Rate"
+    unique_id: ila_30d_wake_success_rate
+    entity_id: input_number.ila_wake_success_flag
+    state_characteristic: mean
+    max_age:
+      days: 30
+
+template:
+  - sensor:
+      - name: "Ila 30d Wake Success Rate Percent"
+        unique_id: ila_30d_wake_success_rate_percent
+        unit_of_measurement: "%"
+        state: >
+          {% set s = states('sensor.ila_30d_wake_success_rate') %}
+          {{ (s | float(0) * 100) | round(0) if s not in ['unknown', 'unavailable', 'none'] else 0 }}
+      - name: "Ila Wake Protocol Status"
+        unique_id: ila_wake_protocol_status
+        icon: mdi:information-outline
+        state: "{{ states('input_select.ila_wake_state') }}"
+        attributes:
+          session_id: "{{ states('input_text.ila_active_wake_session_id') }}"
+          alarm_status: "{{ states('input_text.ila_alarm_status') }}"
+          briefing_status: "{{ states('input_text.ila_briefing_status') }}"
+          current_streak: "{{ states('input_number.ila_current_wake_streak') }}"
+          best_streak: "{{ states('input_number.ila_best_wake_streak') }}"
+          last_wake_detected: "{{ states('input_datetime.ila_last_wake_detected') }}"
+          last_phone_undocked: "{{ states('input_datetime.ila_last_phone_undocked') }}"
+
+# -----------------------------------------------------------------------
+# Lights — grouped so the rest of the package targets one entity.
+# REPLACE-BEFORE-USE: member entities come from secrets.yaml.
+# -----------------------------------------------------------------------
+
+light:
+  - platform: group
+    name: "Ila Wake Lights"
+    unique_id: ila_wake_lights_group
+    entities: !secret wake_light_entities
+
+# -----------------------------------------------------------------------
+# Scripts — the reusable building blocks the automations below compose.
+# -----------------------------------------------------------------------
+
+script:
+  ila_start_lights:
+    alias: "Wakeup: start lights"
+    mode: single
+    sequence:
+      - action: light.turn_on
+        target:
+          entity_id: light.ila_wake_lights
+        data:
+          brightness_pct: "{{ states('input_number.ila_light_brightness_pct') | int(100) }}"
+          transition: "{{ states('input_number.ila_light_transition_seconds') | int(15) }}"
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: info
+          message: >-
+            [{{ states('input_text.ila_active_wake_session_id') }}] lights started
+            (brightness={{ states('input_number.ila_light_brightness_pct') }}%,
+            transition={{ states('input_number.ila_light_transition_seconds') }}s)
+
+  ila_start_alarm:
+    alias: "Wakeup: start phone alarm"
+    mode: single
+    sequence:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_alarm_status
+        data:
+          value: "sounding"
+      - if:
+          - condition: state
+            entity_id: input_boolean.ila_wake_protocol_test_mode
+            state: "on"
+        then:
+          # Test mode must never be able to trigger the real phone alarm.
+          # Send a normal (non-critical) notification instead so the
+          # Shortcuts automation on the phone is never invoked.
+          - action: notify.notify
+            data:
+              title: "Wake protocol (TEST MODE)"
+              message: "Simulated alarm start — the real phone alarm was NOT triggered."
+        else:
+          # REPLACE-BEFORE-USE: notify.mobile_app_ilas_iphone must match
+          # the Companion App's actual notify service name. This push is
+          # the trigger for the "Start Wake Alarm" iOS Personal
+          # Automation described in docs/wakeup-protocol.md — HA does not
+          # play the alarm sound itself.
+          - action: notify.mobile_app_ilas_iphone
+            data:
+              title: "Wake up"
+              message: "ila-wakeup-alarm-start"
+              data:
+                push:
+                  interruption-level: critical
+                  sound:
+                    name: default
+                    critical: 1
+                    volume: 1.0
+                tag: ila-wakeup-alarm
+                group: ila-wakeup
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: info
+          message: "[{{ states('input_text.ila_active_wake_session_id') }}] alarm requested"
+
+  ila_stop_alarm:
+    alias: "Wakeup: stop phone alarm"
+    mode: single
+    sequence:
+      - if:
+          - condition: template
+            value_template: "{{ states('input_text.ila_alarm_status') == 'stopped' }}"
+        then:
+          - stop: "already stopped — idempotent no-op"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_alarm_status
+        data:
+          value: "stopped"
+      - if:
+          - condition: state
+            entity_id: input_boolean.ila_wake_protocol_test_mode
+            state: "off"
+        then:
+          # REPLACE-BEFORE-USE: same notify service as ila_start_alarm.
+          # This is the trigger for the "Stop Wake Alarm" iOS Personal
+          # Automation — it kills the looping audio/alarm-app session
+          # started above, independent of whether the original
+          # notification banner was dismissed on the phone or Watch.
+          - action: notify.mobile_app_ilas_iphone
+            data:
+              title: "Wake up"
+              message: "ila-wakeup-alarm-stop"
+              data:
+                push:
+                  interruption-level: time-sensitive
+                tag: ila-wakeup-alarm
+                group: ila-wakeup
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: info
+          message: "[{{ states('input_text.ila_active_wake_session_id') }}] alarm stop requested"
+
+  ila_start_briefing_generation:
+    alias: "Wakeup: start briefing generation (fire-and-forget)"
+    mode: single
+    sequence:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_briefing_status
+        data:
+          value: "generating"
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: info
+          message: "[{{ states('input_text.ila_active_wake_session_id') }}] briefing generation started"
+      # rest_command returns as soon as the briefing service ACKs the job
+      # (HTTP 202) — it does not wait for text/TTS generation to finish.
+      # The briefing service reports completion asynchronously via the
+      # ila_briefing_ready webhook handled below. continue_on_error means
+      # a dead briefing service (connection refused/timeout) fails this
+      # POST without ever throwing an unhandled script error — we catch
+      # it explicitly below and mark the briefing failed immediately
+      # rather than leaving it stuck at "generating" until playback time.
+      - action: rest_command.ila_trigger_briefing
+        continue_on_error: true
+        response_variable: briefing_trigger_result
+        data:
+          session_id: "{{ states('input_text.ila_active_wake_session_id') }}"
+          test_mode: "{{ is_state('input_boolean.ila_wake_protocol_test_mode', 'on') }}"
+      - if:
+          - condition: template
+            value_template: "{{ briefing_trigger_result is not defined or briefing_trigger_result is none }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ila_briefing_status
+            data:
+              value: "failed"
+          - action: logger.log
+            data:
+              logger: custom_components.wakeup_protocol
+              level: error
+              message: >-
+                [{{ states('input_text.ila_active_wake_session_id') }}] briefing service
+                unreachable — falling back to deterministic greeting at playback
+
+  ila_play_briefing:
+    alias: "Wakeup: play briefing (or deterministic fallback)"
+    mode: single
+    sequence:
+      - if:
+          - condition: template
+            value_template: >-
+              {{ states('input_text.ila_last_playback_session_id') ==
+                 states('input_text.ila_active_wake_session_id') }}
+        then:
+          - stop: "already played for this session — idempotent no-op"
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_text.ila_briefing_status
+                state: "ready"
+              - condition: template
+                value_template: "{{ states('input_text.ila_briefing_audio_url') | trim != '' }}"
+            sequence:
+              # The briefing service pre-generated audio (TTS_PROVIDER
+              # openai/elevenlabs) — play the file it published.
+              - action: media_player.play_media
+                target:
+                  entity_id: !secret briefing_media_player_entity
+                data:
+                  media_content_id: "{{ states('input_text.ila_briefing_audio_url') }}"
+                  media_content_type: music
+          - conditions:
+              - condition: state
+                entity_id: input_text.ila_briefing_status
+                state: "ready"
+            sequence:
+              # Ready, but no pre-generated audio (TTS_PROVIDER=none, or
+              # TTS synthesis failed on the briefing service). Speak the
+              # generated text through HA's own TTS engine instead of
+              # discarding it — see docs "AI Morning Briefing / TTS".
+              - action: tts.speak
+                target:
+                  entity_id: !secret tts_engine_entity
+                data:
+                  media_player_entity_id: !secret briefing_media_player_entity
+                  message: "{{ states('input_text.ila_briefing_text') }}"
+        default:
+          # Briefing not ready yet (still generating, or generation
+          # failed outright): play a short deterministic greeting now,
+          # then let the ila_briefing_ready webhook automation play the
+          # full briefing the moment it lands (still gated on the
+          # dedupe check above, so this never double-plays).
+          - action: tts.speak
+            target:
+              entity_id: !secret tts_engine_entity
+            data:
+              media_player_entity_id: !secret briefing_media_player_entity
+              message: "Good morning. Your full briefing is still on its way."
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_last_playback_session_id
+        data:
+          value: "{{ states('input_text.ila_active_wake_session_id') }}"
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: info
+          message: >-
+            [{{ states('input_text.ila_active_wake_session_id') }}] briefing playback
+            (status={{ states('input_text.ila_briefing_status') }})
+
+  ila_update_streaks_and_metrics:
+    alias: "Wakeup: update streaks and metrics (idempotent per session)"
+    mode: single
+    fields:
+      success:
+        required: true
+        selector:
+          boolean: {}
+    sequence:
+      - if:
+          - condition: template
+            value_template: >-
+              {{ states('input_text.ila_last_processed_session_id') ==
+                 states('input_text.ila_active_wake_session_id') }}
+        then:
+          - stop: "already processed for this session — idempotent no-op"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_last_processed_session_id
+        data:
+          value: "{{ states('input_text.ila_active_wake_session_id') }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ila_wake_success_flag
+        data:
+          value: "{{ 1 if success else 0 }}"
+      - if:
+          - condition: template
+            value_template: "{{ success }}"
+        then:
+          - variables:
+              yesterday: "{{ (now().date() - timedelta(days=1)).isoformat() }}"
+              last_success: "{{ states('input_datetime.ila_last_successful_wake_date') }}"
+          - if:
+              - condition: template
+                value_template: "{{ last_success == yesterday }}"
+            then:
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.ila_current_wake_streak
+                data:
+                  value: "{{ states('input_number.ila_current_wake_streak') | int(0) + 1 }}"
+            else:
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.ila_current_wake_streak
+                data:
+                  value: 1
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.ila_last_successful_wake_date
+            data:
+              date: "{{ now().date().isoformat() }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ states('input_number.ila_current_wake_streak') | float(0) >
+                     states('input_number.ila_best_wake_streak') | float(0) }}
+            then:
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.ila_best_wake_streak
+                data:
+                  value: "{{ states('input_number.ila_current_wake_streak') }}"
+        else:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_current_wake_streak
+            data:
+              value: 0
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: info
+          message: >-
+            [{{ states('input_text.ila_active_wake_session_id') }}] session metrics
+            recorded (success={{ success }}, streak={{ states('input_number.ila_current_wake_streak') }})
+
+  ila_reset_wake_state:
+    alias: "Wakeup: reset to idle"
+    mode: single
+    sequence:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.ila_wake_state
+        data:
+          option: idle
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_active_wake_session_id
+        data:
+          value: ""
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_briefing_status
+        data:
+          value: "idle"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_alarm_status
+        data:
+          value: "idle"
+
+# -----------------------------------------------------------------------
+# Test mode — section 22. All of these are no-ops unless
+# input_boolean.ila_wake_protocol_test_mode is on, so they cannot
+# accidentally run against the production flow. They fire the same
+# normalized events real hardware would, so the state machine above is
+# exercised end-to-end without touching lights, the real alarm, or the
+# real charger.
+# -----------------------------------------------------------------------
+
+  ila_test_simulate_wake:
+    alias: "Test: simulate wake detected"
+    sequence:
+      - if:
+          - condition: not
+            conditions:
+              - condition: state
+                entity_id: input_boolean.ila_wake_protocol_test_mode
+                state: "on"
+        then:
+          - stop: "test mode is off — refusing to simulate"
+      - event: ila_wake_detected
+        event_data:
+          source: test_mode
+          detected_at: "{{ now().isoformat() }}"
+
+  ila_test_simulate_undock:
+    alias: "Test: simulate phone undocked"
+    sequence:
+      - if:
+          - condition: not
+            conditions:
+              - condition: state
+                entity_id: input_boolean.ila_wake_protocol_test_mode
+                state: "on"
+        then:
+          - stop: "test mode is off — refusing to simulate"
+      - event: ila_phone_undocked
+        event_data:
+          source: test_mode
+          detected_at: "{{ now().isoformat() }}"
+
+  ila_test_simulate_duplicate_undock:
+    alias: "Test: simulate duplicate undock (flapping)"
+    sequence:
+      - if:
+          - condition: not
+            conditions:
+              - condition: state
+                entity_id: input_boolean.ila_wake_protocol_test_mode
+                state: "on"
+        then:
+          - stop: "test mode is off — refusing to simulate"
+      - repeat:
+          count: 3
+          sequence:
+            - event: ila_phone_undocked
+              event_data:
+                source: test_mode
+                detected_at: "{{ now().isoformat() }}"
+            - delay:
+                milliseconds: 200
+
+  ila_test_simulate_restart:
+    alias: "Test: simulate a mid-session restart recovery pass"
+    sequence:
+      - if:
+          - condition: not
+            conditions:
+              - condition: state
+                entity_id: input_boolean.ila_wake_protocol_test_mode
+                state: "on"
+        then:
+          - stop: "test mode is off — refusing to simulate"
+      # Refires the same bus event the "homeassistant" trigger platform
+      # listens for (EVENT_HOMEASSISTANT_START = "homeassistant_start"),
+      # rather than targeting the restart-recovery automation by entity_id
+      # — automation entity_ids are slugified from the alias, not the
+      # `id:` field, so guessing one here would be fragile.
+      - event: homeassistant_start
+
+# -----------------------------------------------------------------------
+# REST bridge to the briefing microservice.
+#
+# !secret can only be the entire value of a YAML node, so it can't be
+# spliced into a Jinja template string directly. The webhook ID the
+# briefing service must call back to is therefore mirrored into a plain
+# input_text helper once at startup (see the "startup" automation below),
+# and the rest_command payload template reads it from there to build the
+# callback URL.
+# -----------------------------------------------------------------------
+
+rest_command:
+  ila_trigger_briefing:
+    url: !secret briefing_generate_url
+    method: POST
+    timeout: 10
+    headers:
+      Authorization: !secret briefing_auth_header
+      Content-Type: application/json
+    # Built as a Jinja dict + `tojson` rather than hand-assembled JSON
+    # string interpolation, so list/string escaping is never our problem.
+    #
+    # callback_url deliberately does NOT use 127.0.0.1 — this URL is
+    # embedded in a payload that the *briefing container* will later POST
+    # to, and unlike Home Assistant, briefing is NOT on network_mode:
+    # host (see compose.yaml "Networking summary" for why it stays
+    # isolated on the bridge network). From inside that container,
+    # 127.0.0.1 is the briefing container itself, not the host — the
+    # callback would silently fail every time. `host.docker.internal`
+    # (mapped to the host gateway via `extra_hosts` on the briefing
+    # service in compose.yaml) is what actually resolves to the host,
+    # and therefore to Home Assistant's host-networked listener, from
+    # inside a bridge-network container.
+    payload: >-
+      {% set priorities = states('input_text.ila_todays_priorities').split('\n')
+         | map('trim') | select | list %}
+      {{ {
+           "session_id": session_id,
+           "test_mode": test_mode,
+           "current_streak": states('input_number.ila_current_wake_streak') | int(0),
+           "priorities": priorities,
+           "name": "Ila",
+           "callback_url": "http://host.docker.internal:8123/api/webhook/" ~ states('input_text.ila_briefing_ready_webhook_id')
+         } | tojson }}
+
+# -----------------------------------------------------------------------
+# Automations — the state machine.
+# -----------------------------------------------------------------------
+
+automation:
+  - id: ila_wakeup_startup_init
+    alias: "Wakeup: startup init"
+    description: >-
+      Runs at every Home Assistant start. Always re-populates the
+      internal webhook-id mirror (cheap, and must genuinely happen every
+      boot since it's read from secrets.yaml, not restored state). Only
+      applies the wake-window/tunable/status DEFAULTS on the very first
+      boot ever (input_boolean.ila_defaults_applied still off) — on every
+      subsequent restart it leaves them alone, since they're meant to be
+      dashboard-adjustable and stay adjusted. See the comment on
+      ila_defaults_applied above and "Restart safety" in
+      docs/wakeup-protocol.md.
+    triggers:
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_briefing_ready_webhook_id
+        data:
+          value: !secret briefing_ready_webhook_id
+      - if:
+          - condition: state
+            entity_id: input_boolean.ila_defaults_applied
+            state: "off"
+        then:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.ila_wake_window_start
+            data:
+              time: "05:00:00"
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.ila_wake_window_end
+            data:
+              time: "12:00:00"
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_wake_success_window_minutes
+            data:
+              value: 10
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_light_transition_seconds
+            data:
+              value: 15
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_light_brightness_pct
+            data:
+              value: 100
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_briefing_timeout_seconds
+            data:
+              value: 120
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_alarm_timeout_minutes
+            data:
+              value: 30
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ila_briefing_status
+            data:
+              value: "idle"
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ila_alarm_status
+            data:
+              value: "idle"
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.ila_defaults_applied
+
+  # -------------------------------------------------------------------
+  # Adapter boundary: Apple wake signal -> normalized ila_wake_detected
+  # event. See docs/wakeup-protocol.md "Apple Watch Wake Detection" and
+  # "Wake gateway" for what actually triggers this and its
+  # latency/reliability limitations — there is no first-party real-time
+  # "user woke up" API. The event itself arrives on this bus NOT via an
+  # HA webhook, but via services/wake-gateway (a standalone Python
+  # service) POSTing to Home Assistant's REST events API
+  # (`POST /api/events/ila_wake_detected`) after an iOS Shortcuts
+  # automation hits its `/wake/<token>` endpoint. Nothing here couples to
+  # that — this package only ever consumes the normalized event, exactly
+  # as it would if the event had arrived some other way.
+  # -------------------------------------------------------------------
+
+  # -------------------------------------------------------------------
+  # Raw signal: companion-app battery state going Charging -> Not
+  # Charging. This ALWAYS fires the normalized undock event — the
+  # "was this during an active session" guard lives in the completion
+  # automation below, per the normalized-event architecture in the spec.
+  # A 5s `for:` debounces charger-state flapping.
+  # REPLACE-BEFORE-USE: sensor entity comes from secrets.yaml.
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_charger_undock_signal
+    alias: "Wakeup: charger undock raw signal"
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: !secret iphone_battery_state_entity
+        from:
+          - "Charging"
+          - "Full"
+        to: "Not Charging"
+        for:
+          seconds: 5
+    actions:
+      - event: ila_phone_undocked
+        event_data:
+          source: ios
+          detected_at: "{{ now().isoformat() }}"
+
+  # Fallback path: an iOS Shortcut fired directly on charger disconnect
+  # (MagSafe/Qi accessory event, or manual), via services/wake-gateway's
+  # `/undock/<token>` endpoint -> HA's REST events API, same mechanism as
+  # the wake adapter above. Same normalized event, so downstream logic
+  # doesn't care which path fired it.
+
+  # -------------------------------------------------------------------
+  # Fast path — section 10 of the spec. Every guard is evaluated before
+  # anything happens; lights and alarm start in the same breath and
+  # never wait on the briefing.
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_fast_path
+    alias: "Wakeup: fast path (wake detected)"
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: ila_wake_detected
+    variables:
+      window_start: "{{ states('input_datetime.ila_wake_window_start') }}"
+      window_end: "{{ states('input_datetime.ila_wake_window_end') }}"
+    condition:
+      - condition: state
+        entity_id: input_boolean.ila_wake_protocol_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.ila_wake_protocol_emergency_stop
+        state: "off"
+      - condition: state
+        entity_id: input_select.ila_wake_state
+        state: idle
+      - condition: template
+        value_template: >-
+          {{ window_start <= now().strftime('%H:%M:%S') <= window_end }}
+    actions:
+      - if:
+          - condition: state
+            entity_id: input_boolean.ila_wake_protocol_skip_next
+            state: "on"
+        then:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.ila_wake_protocol_skip_next
+          - action: logger.log
+            data:
+              logger: custom_components.wakeup_protocol
+              level: info
+              message: "wake detected but skip_next was set — session skipped"
+          - stop: "skip_next consumed"
+      - variables:
+          session_id: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_active_wake_session_id
+        data:
+          value: "{{ session_id }}"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_wake_trigger_source
+        data:
+          value: "{{ trigger.event.data.source | default('unknown') }}"
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ila_last_wake_detected
+        data:
+          timestamp: "{{ now().timestamp() }}"
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.ila_wake_state
+        data:
+          option: waking
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: info
+          message: "[{{ session_id }}] wake event received (source={{ trigger.event.data.source | default('unknown') }})"
+      - parallel:
+          - action: script.turn_on
+            target:
+              entity_id: script.ila_start_lights
+          - action: script.turn_on
+            target:
+              entity_id: script.ila_start_alarm
+      - action: script.turn_on
+        target:
+          entity_id: script.ila_start_briefing_generation
+        # Fire-and-forget: script.turn_on (not script.ila_start_briefing_generation
+        # called directly) so this action returns immediately regardless of
+        # how long the rest_command inside that script takes.
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.ila_wake_state
+        data:
+          option: waiting_for_phone_undock
+
+  # -------------------------------------------------------------------
+  # Rejected wake events — observability per section 21.
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_rejected
+    alias: "Wakeup: log rejected wake event"
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: ila_wake_detected
+    condition:
+      - condition: not
+        conditions:
+          - condition: and
+            conditions:
+              - condition: state
+                entity_id: input_boolean.ila_wake_protocol_enabled
+                state: "on"
+              - condition: state
+                entity_id: input_boolean.ila_wake_protocol_emergency_stop
+                state: "off"
+              - condition: state
+                entity_id: input_select.ila_wake_state
+                state: idle
+    actions:
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: warning
+          message: >-
+            wake event rejected by guard (enabled={{ is_state('input_boolean.ila_wake_protocol_enabled', 'on') }},
+            emergency_stop={{ is_state('input_boolean.ila_wake_protocol_emergency_stop', 'on') }},
+            state={{ states('input_select.ila_wake_state') }})
+
+  # -------------------------------------------------------------------
+  # Completion — section 15. Guarded to only act during an active
+  # session, so ordinary daytime charging/undocking is a silent no-op.
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_completion
+    alias: "Wakeup: completion (phone undocked)"
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: ila_phone_undocked
+    condition:
+      - condition: state
+        entity_id: input_select.ila_wake_state
+        state: waiting_for_phone_undock
+    variables:
+      undocked_at: "{{ now() }}"
+      detected_at: "{{ as_datetime(states('input_datetime.ila_last_wake_detected')) }}"
+      latency_seconds: "{{ (as_timestamp(undocked_at) - as_timestamp(detected_at)) | round(0) }}"
+      window_seconds: "{{ (states('input_number.ila_wake_success_window_minutes') | int(10)) * 60 }}"
+    actions:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ila_last_phone_undocked
+        data:
+          timestamp: "{{ now().timestamp() }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ila_launch_latency_seconds
+        data:
+          value: "{{ latency_seconds }}"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_undock_trigger_source
+        data:
+          value: "{{ trigger.event.data.source | default('unknown') }}"
+      - action: script.turn_on
+        target:
+          entity_id: script.ila_stop_alarm
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.ila_wake_state
+        data:
+          option: up
+      - action: script.ila_update_streaks_and_metrics
+        data:
+          success: "{{ latency_seconds <= window_seconds }}"
+      - action: script.turn_on
+        target:
+          entity_id: script.ila_play_briefing
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: info
+          message: >-
+            [{{ states('input_text.ila_active_wake_session_id') }}] phone undocked,
+            latency={{ latency_seconds }}s (source={{ trigger.event.data.source | default('unknown') }})
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.ila_wake_state
+        data:
+          option: complete
+
+  # -------------------------------------------------------------------
+  # Success-window timeout — marks the session late for streak purposes.
+  # Does NOT stop the alarm; the alarm keeps running until undock or the
+  # separate alarm_timeout safety cutoff below.
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_success_window_timeout
+    alias: "Wakeup: success window exceeded"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_select.ila_wake_state
+        to: waiting_for_phone_undock
+        for:
+          minutes: "{{ states('input_number.ila_wake_success_window_minutes') | int(10) }}"
+    condition:
+      - condition: state
+        entity_id: input_select.ila_wake_state
+        state: waiting_for_phone_undock
+    actions:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.ila_wake_state
+        data:
+          option: late_wake
+      - action: script.ila_update_streaks_and_metrics
+        data:
+          success: false
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: warning
+          message: "[{{ states('input_text.ila_active_wake_session_id') }}] success window exceeded — late_wake"
+
+  # -------------------------------------------------------------------
+  # Alarm safety cutoff — hard stop regardless of session outcome, so a
+  # broken undock signal can't leave the alarm sounding indefinitely.
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_alarm_timeout
+    alias: "Wakeup: alarm safety timeout"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_text.ila_alarm_status
+        to: "sounding"
+        for:
+          minutes: "{{ states('input_number.ila_alarm_timeout_minutes') | int(30) }}"
+    actions:
+      - action: script.turn_on
+        target:
+          entity_id: script.ila_stop_alarm
+      - if:
+          - condition: state
+            entity_id: input_select.ila_wake_state
+            state: waiting_for_phone_undock
+        then:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.ila_wake_state
+            data:
+              option: error
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: error
+          message: "[{{ states('input_text.ila_active_wake_session_id') }}] alarm safety timeout reached — force-stopped"
+
+  # -------------------------------------------------------------------
+  # Emergency stop — section 19. Force-quiets everything immediately.
+  # This control should only be exposed on the Companion App / a
+  # dashboard view that is not mounted beside the bed — see docs.
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_emergency_stop
+    alias: "Wakeup: emergency stop"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.ila_wake_protocol_emergency_stop
+        to: "on"
+    actions:
+      - action: script.turn_on
+        target:
+          entity_id: script.ila_stop_alarm
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.ila_wake_state
+        data:
+          option: error
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: error
+          message: "[{{ states('input_text.ila_active_wake_session_id') }}] EMERGENCY STOP triggered"
+      - delay:
+          seconds: 3
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.ila_wake_protocol_emergency_stop
+
+  # -------------------------------------------------------------------
+  # Daily reset — the state machine's return-to-idle. Also the safety
+  # net that guarantees skip_next auto-clears even if no wake event
+  # happens (spec section 19).
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_daily_reset
+    alias: "Wakeup: daily reset"
+    mode: single
+    triggers:
+      - trigger: time
+        at: input_datetime.ila_wake_window_start
+    actions:
+      - action: script.ila_reset_wake_state
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.ila_wake_protocol_skip_next
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_last_processed_session_id
+        data:
+          value: ""
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ila_last_playback_session_id
+        data:
+          value: ""
+
+  # -------------------------------------------------------------------
+  # Restart safety — section 20. Reconciles state left over from a
+  # crash or Portainer redeploy that happened mid-session. Elapsed time
+  # is computed explicitly from input_datetime.ila_last_wake_detected
+  # rather than relied on via the `for:` triggers above, since restored
+  # helper values are not guaranteed to carry their original
+  # last_changed timestamp across a restart.
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_restart_recovery
+    alias: "Wakeup: restart recovery"
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+    condition:
+      - condition: template
+        value_template: >-
+          {{ states('input_select.ila_wake_state') in ['waking', 'waiting_for_phone_undock', 'up'] }}
+    variables:
+      detected_at: "{{ as_datetime(states('input_datetime.ila_last_wake_detected')) }}"
+      elapsed_seconds: "{{ (now().timestamp() - as_timestamp(detected_at)) | round(0) }}"
+      window_seconds: "{{ (states('input_number.ila_wake_success_window_minutes') | int(10)) * 60 }}"
+    actions:
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: warning
+          message: >-
+            [{{ states('input_text.ila_active_wake_session_id') }}] recovering session
+            after restart (elapsed={{ elapsed_seconds }}s, wake_state={{ states('input_select.ila_wake_state') }})
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_select.ila_wake_state
+                state: "up"
+            sequence:
+              # Crashed between recording the undock and finishing the
+              # completion automation. Undock was already recorded
+              # (including input_number.ila_launch_latency_seconds) —
+              # just finalize using that already-computed latency.
+              - action: script.turn_on
+                target:
+                  entity_id: script.ila_stop_alarm
+              - action: script.ila_update_streaks_and_metrics
+                data:
+                  success: >-
+                    {{ (states('input_number.ila_launch_latency_seconds') | float(999999)) <= window_seconds }}
+              - action: input_select.select_option
+                target:
+                  entity_id: input_select.ila_wake_state
+                data:
+                  option: complete
+          - conditions:
+              # Fixed: this used to be wrapped in `condition: not`, which
+              # inverted the check — it fired on "still Charging/Full"
+              # (phone never left the charger) and fell through to the
+              # "still waiting" branch on genuine "Not Charging" restarts,
+              # exactly backwards. A restart with the phone still docked
+              # must NOT be treated as an undock.
+              - condition: state
+                entity_id: !secret iphone_battery_state_entity
+                state: "Not Charging"
+            sequence:
+              # Phone undocked while HA was down. The physical alarm
+              # mechanism lives on the phone, not in HA, so it is
+              # unaffected by the restart — this just catches up HA's
+              # own bookkeeping.
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: input_datetime.ila_last_phone_undocked
+                data:
+                  timestamp: "{{ now().timestamp() }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ila_undock_trigger_source
+                data:
+                  value: "recovered_at_restart"
+              - action: script.turn_on
+                target:
+                  entity_id: script.ila_stop_alarm
+              - action: script.ila_update_streaks_and_metrics
+                data:
+                  success: "{{ elapsed_seconds <= window_seconds }}"
+              - action: input_select.select_option
+                target:
+                  entity_id: input_select.ila_wake_state
+                data:
+                  option: "{{ 'complete' if elapsed_seconds <= window_seconds else 'late_wake' }}"
+        default:
+          - if:
+              - condition: template
+                value_template: "{{ elapsed_seconds > window_seconds }}"
+            then:
+              - action: input_select.select_option
+                target:
+                  entity_id: input_select.ila_wake_state
+                data:
+                  option: late_wake
+              - action: script.ila_update_streaks_and_metrics
+                data:
+                  success: false
+            else:
+              # Still within the window and still charging — resume
+              # waiting. The success-window and alarm-timeout
+              # automations re-evaluate against the real elapsed time on
+              # their next trigger since they are state-based, not
+              # relying on a timer that survived the restart.
+              - action: logger.log
+                data:
+                  logger: custom_components.wakeup_protocol
+                  level: info
+                  message: >-
+                    [{{ states('input_text.ila_active_wake_session_id') }}] session still
+                    within window after restart — resuming wait
+
+  # -------------------------------------------------------------------
+  # Briefing service callback. The briefing service calls this webhook
+  # when text+TTS generation finishes (or fails) — see
+  # services/briefing/README.md. Never gates alarm behavior; only
+  # updates briefing state and, if the session is already at the point
+  # of waiting for a briefing to play, triggers playback immediately.
+  # -------------------------------------------------------------------
+  - id: ila_wakeup_briefing_ready
+    alias: "Wakeup: briefing ready callback"
+    mode: queued
+    triggers:
+      - trigger: webhook
+        webhook_id: !secret briefing_ready_webhook_id
+        allowed_methods: [POST]
+        local_only: true
+    condition:
+      - condition: template
+        value_template: >-
+          {{ trigger.json.session_id | default('') == states('input_text.ila_active_wake_session_id') }}
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ila_briefing_generation_duration_seconds
+        data:
+          value: "{{ trigger.json.duration_seconds | default(0) }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.json.status | default('failed') == 'ready' }}"
+            sequence:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ila_briefing_text
+                data:
+                  value: "{{ (trigger.json.text | default(''))[:2000] }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ila_briefing_audio_url
+                data:
+                  value: "{{ trigger.json.audio_url | default('') }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ila_briefing_status
+                data:
+                  value: "ready"
+        default:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ila_briefing_status
+            data:
+              value: "failed"
+      - action: logger.log
+        data:
+          logger: custom_components.wakeup_protocol
+          level: info
+          message: >-
+            [{{ states('input_text.ila_active_wake_session_id') }}] briefing callback
+            (status={{ trigger.json.status | default('failed') }})
+      # If we're already past the point of waiting for a briefing (undock
+      # already happened and a fallback greeting may have played), play
+      # the real briefing now. ila_play_briefing's own dedupe guard keeps
+      # this from double-playing if it already ran with status=ready.
+      - if:
+          - condition: template
+            value_template: "{{ states('input_select.ila_wake_state') in ['up', 'complete'] }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ila_last_playback_session_id
+            data:
+              value: ""
+          - action: script.turn_on
+            target:
+              entity_id: script.ila_play_briefing
+

@@ -206,3 +206,37 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# --- Zero-Willpower Wake-Up Protocol / Home Assistant deployment ---
+
+# Runtime data — never committed. See docs/wakeup-protocol.md "Persistence".
+# (Directories are un-ignored so the .gitkeep negation below can actually
+# take effect — git refuses to re-include a file whose parent directory
+# is itself excluded.)
+data/**
+!data/**/
+!data/**/.gitkeep
+
+# Belt-and-suspenders: these should only ever live under ./data/, but
+# ignore them here too in case someone points a volume at ./homeassistant
+# directly during local testing.
+homeassistant/.storage/
+homeassistant/.cloud/
+homeassistant/*.db
+homeassistant/*.db-*
+homeassistant/home-assistant_v2.db*
+homeassistant/home-assistant.log*
+homeassistant/*.log*
+homeassistant/tts/
+homeassistant/image/
+homeassistant/.HA_VERSION
+homeassistant/deps/
+homeassistant/secrets.yaml
+homeassistant/www/briefing/*.mp3
+homeassistant/www/briefing/*.json
+!homeassistant/www/briefing/.gitkeep
+
+# Env files with real secrets
+.env
+.env.*
+!.env.example
+

@@ -1,0 +1,97 @@
+# Wake-Up Protocol dashboard. Add as a YAML-mode Lovelace dashboard:
+# Settings > Dashboards > Add Dashboard > "Take control" pointing at this
+# file, or reference it directly via `lovelace: dashboards:` in
+# configuration.yaml if you prefer it fully declarative.
+#
+# Deliberately does NOT include input_boolean.ila_wake_protocol_emergency_stop
+# — see docs/wakeup-protocol.md "Controls": that control should live on
+# the Companion App or a view that isn't mounted where it'd become a
+# routine snooze button beside the bed.
+
+title: Wake-Up Protocol
+views:
+  - title: Wake-Up
+    path: wakeup
+    icon: mdi:sleep-off
+    cards:
+      - type: entities
+        title: Status
+        entities:
+          - entity: sensor.ila_wake_protocol_status
+            name: Current state
+          - entity: input_text.ila_alarm_status
+            name: Alarm
+          - entity: input_text.ila_briefing_status
+            name: Briefing
+          - entity: input_text.ila_wake_trigger_source
+            name: Last wake source
+          - entity: input_text.ila_undock_trigger_source
+            name: Last undock source
+
+      - type: glance
+        title: Streak
+        entities:
+          - entity: input_number.ila_current_wake_streak
+            name: Current
+          - entity: input_number.ila_best_wake_streak
+            name: Best
+          - entity: sensor.ila_30d_wake_success_rate_percent
+            name: 30d success
+
+      - type: entities
+        title: Latest session
+        entities:
+          - entity: input_number.ila_launch_latency_seconds
+            name: Launch latency (s)
+          - entity: sensor.ila_7d_average_wake_latency
+            name: 7d average latency (s)
+          - entity: input_number.ila_briefing_generation_duration_seconds
+            name: Briefing generation time (s)
+          - entity: input_datetime.ila_last_wake_detected
+          - entity: input_datetime.ila_last_phone_undocked
+
+      - type: entities
+        title: Controls
+        entities:
+          - entity: input_boolean.ila_wake_protocol_enabled
+          - entity: input_boolean.ila_wake_protocol_skip_next
+          - entity: input_boolean.ila_wake_protocol_test_mode
+          - entity: input_text.ila_todays_priorities
+            name: Today's priorities
+
+      - type: entities
+        title: Tunables
+        show_header_toggle: false
+        entities:
+          - input_number.ila_wake_success_window_minutes
+          - input_number.ila_light_transition_seconds
+          - input_number.ila_light_brightness_pct
+          - input_number.ila_briefing_timeout_seconds
+          - input_number.ila_alarm_timeout_minutes
+          - input_datetime.ila_wake_window_start
+          - input_datetime.ila_wake_window_end
+
+      - type: conditional
+        conditions:
+          - entity: input_boolean.ila_wake_protocol_test_mode
+            state: "on"
+        card:
+          type: entities
+          title: Test mode
+          entities:
+            - entity: script.ila_test_simulate_wake
+              name: Simulate wake detected
+            - entity: script.ila_test_simulate_undock
+              name: Simulate phone undocked
+            - entity: script.ila_test_simulate_duplicate_undock
+              name: Simulate flapping undock
+            - entity: script.ila_test_simulate_restart
+              name: Simulate restart recovery
+
+      - type: logbook
+        title: Recent activity
+        entities:
+          - input_select.ila_wake_state
+          - input_text.ila_alarm_status
+          - input_text.ila_briefing_status
+        hours_to_show: 24

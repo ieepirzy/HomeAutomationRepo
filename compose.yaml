@@ -1,0 +1,122 @@
+# Zero-Willpower Wake-Up Protocol — production Compose stack.
+#
+# Deployed via Portainer's "Git repository" stack feature. See
+# docs/wakeup-protocol.md for the deployment architecture, networking
+# rationale, and the declarative-vs-UI-provisioned integration model.
+#
+# Networking summary:
+#   - homeassistant runs on network_mode: host. This repo previously ran
+#     WiZ/webOS/AppleTV control as separate Flask microservices reachable
+#     over a bridge network (see git history). Home Assistant has native,
+#     actively maintained integrations for all three (wiz, webostv,
+#     apple_tv) plus mDNS/SSDP discovery, Apple TV pairing, and the
+#     Companion App's local push notifications — all of which want direct
+#     access to the LAN. Host networking is the supported way to get that
+#     with Home Assistant, so those microservices were retired rather than
+#     ported. This is a deliberate consolidation, not neglect.
+#   - The briefing service stays on the default bridge network and only
+#     publishes to 127.0.0.1, since Home Assistant (on the host network)
+#     reaches it via localhost. It is never exposed to the LAN or internet.
+#   - wake-gateway runs on network_mode: host too. Unlike briefing, it
+#     genuinely needs to be reachable from the LAN (iOS Shortcuts on the
+#     phone hits it directly), and it needs to reach Home Assistant's
+#     REST API on the host's loopback address the same way homeassistant
+#     itself does — host networking gets both for free with no explicit
+#     port publishing. See services/wake-gateway/README.md.
+#
+# Persistence summary:
+#   - ./homeassistant is the git-tracked declarative config (YAML only).
+#   - ./data/homeassistant/storage is bind-mounted OVER /config/.storage
+#     inside the container. This keeps UI-managed integration state
+#     (auth, device registry, person/companion-app link) physically
+#     outside the git working tree, so it cannot be affected by how
+#     Portainer performs a Git pull/redeploy.
+#   - ./data/homeassistant/data holds the recorder database and anything
+#     else HA writes at runtime (see configuration.yaml `recorder.db_url`).
+#   - Nothing under ./data is committed to git (see .gitignore).
+
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:2026.7.4
+    container_name: homeassistant
+    restart: unless-stopped
+    network_mode: host
+    privileged: false
+    volumes:
+      - ./homeassistant:/config
+      - ./data/homeassistant/storage:/config/.storage
+      - ./data/homeassistant/data:/config/data
+      - /etc/localtime:/etc/localtime:ro
+      - /run/dbus:/run/dbus:ro
+    environment:
+      TZ: ${TZ:-Europe/Helsinki}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8123/manifest.json', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      briefing:
+        condition: service_healthy
+      wake-gateway:
+        condition: service_healthy
+
+  briefing:
+    build:
+      context: ./services/briefing
+    container_name: wakeup-briefing
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${BRIEFING_PORT:-8420}:8420"
+    # briefing stays on the bridge network (see the Networking summary
+    # above), but it needs to reach the host-networked Home Assistant
+    # container to POST its completion callback. host-gateway is
+    # Docker's portable mechanism for "resolve to the host's own IP from
+    # inside a bridge-network container" — see
+    # homeassistant/packages/wakeup_protocol.yaml's rest_command comment
+    # for the full explanation of why 127.0.0.1 doesn't work here.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data/briefing-cache:/data/cache
+      - ./homeassistant/www/briefing:/data/published
+    environment:
+      TZ: ${TZ:-Europe/Helsinki}
+      BRIEFING_PORT: 8420
+      BRIEFING_AUTH_TOKEN: ${BRIEFING_AUTH_TOKEN:?set BRIEFING_AUTH_TOKEN in .env}
+      XAI_API_KEY: ${XAI_API_KEY:?set XAI_API_KEY in .env}
+      XAI_MODEL: ${XAI_MODEL:-grok-4.3}
+      XAI_BASE_URL: ${XAI_BASE_URL:-https://api.x.ai/v1}
+      TTS_PROVIDER: ${TTS_PROVIDER:-xai}
+      XAI_TTS_VOICE_ID: ${XAI_TTS_VOICE_ID:-eve}
+      XAI_TTS_LANGUAGE: ${XAI_TTS_LANGUAGE:-en}
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY:-}
+      HOME_LAT: ${HOME_LAT:-61.4991}
+      HOME_LON: ${HOME_LON:-23.7871}
+      CACHE_DIR: /data/cache
+      PUBLISH_DIR: /data/published
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8420/healthz', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  wake-gateway:
+    build:
+      context: ./services/wake-gateway
+    container_name: wakeup-gateway
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      WAKE_TOKEN: ${WAKE_TOKEN:?set WAKE_TOKEN in .env}
+      UNDOCK_TOKEN: ${UNDOCK_TOKEN:?set UNDOCK_TOKEN in .env}
+      HA_LONG_LIVED_TOKEN: ${HA_LONG_LIVED_TOKEN:?set HA_LONG_LIVED_TOKEN in .env — see services/wake-gateway/README.md}
+      HA_BASE_URL: ${HA_BASE_URL:-http://127.0.0.1:8123}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8422/healthz', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
