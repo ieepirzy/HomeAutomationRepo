@@ -69,6 +69,15 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:${BRIEFING_PORT:-8420}:8420"
+    # briefing stays on the bridge network (see the Networking summary
+    # above), but it needs to reach the host-networked Home Assistant
+    # container to POST its completion callback. host-gateway is
+    # Docker's portable mechanism for "resolve to the host's own IP from
+    # inside a bridge-network container" — see
+    # homeassistant/packages/wakeup_protocol.yaml's rest_command comment
+    # for the full explanation of why 127.0.0.1 doesn't work here.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data/briefing-cache:/data/cache
       - ./homeassistant/www/briefing:/data/published

@@ -31,23 +31,46 @@
 # recorder already has.
 # -----------------------------------------------------------------------
 
+# None of the helpers below set `initial:`. Home Assistant's input_*
+# helpers only restore their last value across a restart when `initial`
+# is OMITTED — if it's set, the entity is force-reset to that value on
+# every single restart, not just the first-ever one, silently discarding
+# whatever the user (or an automation) had set. That's actively wrong for
+# almost everything in this package: it defeated skip_next (a user
+# setting made before bed, wiped by a Portainer redeploy overnight), and
+# it made the restart-recovery automation below unreachable in practice
+# (ila_wake_state was being force-reset to "idle" before that automation
+# ever got a chance to see whatever state a crash had left it in). See
+# docs/wakeup-protocol.md "Restart safety" for the full explanation.
+#
+# Omitting `initial` still needs a sane first-ever-boot value, which
+# doesn't come from this key — see the `ila_wakeup_startup_init`
+# automation below, which applies defaults only when the current value
+# is genuinely unset (unknown/unavailable), never unconditionally.
 input_boolean:
   ila_wake_protocol_enabled:
     name: "Wake Protocol Enabled"
     icon: mdi:power
-    initial: true
   ila_wake_protocol_test_mode:
     name: "Wake Protocol Test Mode"
     icon: mdi:test-tube
-    initial: false
   ila_wake_protocol_skip_next:
     name: "Wake Protocol Skip Next"
     icon: mdi:skip-next
-    initial: false
   ila_wake_protocol_emergency_stop:
     name: "Wake Protocol Emergency Stop"
     icon: mdi:stop-circle
-    initial: false
+  ila_defaults_applied:
+    name: "Wake Protocol Defaults Applied (internal)"
+    icon: mdi:cog-outline
+    # Gates the one-time-only default-application logic in
+    # ila_wakeup_startup_init. Relying on this rather than checking
+    # whether the tunables/wake-window helpers are "unknown" avoids
+    # depending on exactly what input_number/input_datetime fall back to
+    # on a true first boot with no `initial:` and no restored state —
+    # that fallback isn't clearly documented, whereas input_boolean's own
+    # no-initial/no-restore fallback (False) is unambiguous and is
+    # already relied on everywhere else in this file.
 
 input_select:
   ila_wake_state:
@@ -61,7 +84,10 @@ input_select:
       - complete
       - late_wake
       - error
-    initial: idle
+    # No `initial:` (see the note above the input_boolean block). Home
+    # Assistant's own fallback when there's no restored state AND no
+    # initial is the first item in `options`, which is "idle" — so a
+    # genuine first-ever boot behaves identically to before.
 
 input_datetime:
   ila_last_wake_detected:
@@ -120,40 +146,41 @@ input_number:
     mode: box
 
   # --- Tunables (section 18 of the spec) ---
+  # Deliberately no `initial:` here either — these are meant to be
+  # dashboard-adjustable and stay adjusted across restarts (see the note
+  # above the input_boolean block). Sane first-boot defaults are applied
+  # once by ila_wakeup_startup_init below, not baked in here — input_number's
+  # own no-initial/no-restore fallback is `min`, which would be a bad
+  # default for e.g. alarm_timeout_minutes (5) or light_brightness_pct (1).
   ila_wake_success_window_minutes:
     name: "Wake Success Window Minutes"
     min: 1
     max: 60
     step: 1
-    initial: 10
     mode: box
   ila_light_transition_seconds:
     name: "Wake Light Transition Seconds"
     min: 1
     max: 120
     step: 1
-    initial: 15
     mode: box
   ila_light_brightness_pct:
     name: "Wake Light Brightness Percent"
     min: 1
     max: 100
     step: 1
-    initial: 100
     mode: box
   ila_briefing_timeout_seconds:
     name: "Briefing Timeout Seconds"
     min: 10
     max: 300
     step: 5
-    initial: 120
     mode: box
   ila_alarm_timeout_minutes:
     name: "Alarm Timeout Minutes"
     min: 5
     max: 120
     step: 5
-    initial: 30
     mode: box
 
 input_text:
@@ -169,7 +196,6 @@ input_text:
   ila_briefing_status:
     name: "Briefing Status"
     max: 30
-    initial: "idle"
   ila_briefing_audio_url:
     name: "Briefing Audio URL"
     max: 255
@@ -179,7 +205,6 @@ input_text:
   ila_alarm_status:
     name: "Alarm Status"
     max: 30
-    initial: "idle"
   ila_wake_trigger_source:
     name: "Wake Trigger Source"
     max: 50
@@ -675,6 +700,18 @@ rest_command:
       Content-Type: application/json
     # Built as a Jinja dict + `tojson` rather than hand-assembled JSON
     # string interpolation, so list/string escaping is never our problem.
+    #
+    # callback_url deliberately does NOT use 127.0.0.1 — this URL is
+    # embedded in a payload that the *briefing container* will later POST
+    # to, and unlike Home Assistant, briefing is NOT on network_mode:
+    # host (see compose.yaml "Networking summary" for why it stays
+    # isolated on the bridge network). From inside that container,
+    # 127.0.0.1 is the briefing container itself, not the host — the
+    # callback would silently fail every time. `host.docker.internal`
+    # (mapped to the host gateway via `extra_hosts` on the briefing
+    # service in compose.yaml) is what actually resolves to the host,
+    # and therefore to Home Assistant's host-networked listener, from
+    # inside a bridge-network container.
     payload: >-
       {% set priorities = states('input_text.ila_todays_priorities').split('\n')
          | map('trim') | select | list %}
@@ -684,7 +721,7 @@ rest_command:
            "current_streak": states('input_number.ila_current_wake_streak') | int(0),
            "priorities": priorities,
            "name": "Ila",
-           "callback_url": "http://127.0.0.1:8123/api/webhook/" ~ states('input_text.ila_briefing_ready_webhook_id')
+           "callback_url": "http://host.docker.internal:8123/api/webhook/" ~ states('input_text.ila_briefing_ready_webhook_id')
          } | tojson }}
 
 # -----------------------------------------------------------------------
@@ -695,10 +732,15 @@ automation:
   - id: ila_wakeup_startup_init
     alias: "Wakeup: startup init"
     description: >-
-      Populates the internal webhook-id mirror used by rest_command
-      payload templates (see the comment above rest_command). Runs once
-      at every Home Assistant start, before anything else in this
-      package needs it.
+      Runs at every Home Assistant start. Always re-populates the
+      internal webhook-id mirror (cheap, and must genuinely happen every
+      boot since it's read from secrets.yaml, not restored state). Only
+      applies the wake-window/tunable/status DEFAULTS on the very first
+      boot ever (input_boolean.ila_defaults_applied still off) — on every
+      subsequent restart it leaves them alone, since they're meant to be
+      dashboard-adjustable and stay adjusted. See the comment on
+      ila_defaults_applied above and "Restart safety" in
+      docs/wakeup-protocol.md.
     triggers:
       - trigger: homeassistant
         event: start
@@ -708,16 +750,59 @@ automation:
           entity_id: input_text.ila_briefing_ready_webhook_id
         data:
           value: !secret briefing_ready_webhook_id
-      - action: input_datetime.set_datetime
-        target:
-          entity_id: input_datetime.ila_wake_window_start
-        data:
-          time: "05:00:00"
-      - action: input_datetime.set_datetime
-        target:
-          entity_id: input_datetime.ila_wake_window_end
-        data:
-          time: "12:00:00"
+      - if:
+          - condition: state
+            entity_id: input_boolean.ila_defaults_applied
+            state: "off"
+        then:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.ila_wake_window_start
+            data:
+              time: "05:00:00"
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.ila_wake_window_end
+            data:
+              time: "12:00:00"
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_wake_success_window_minutes
+            data:
+              value: 10
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_light_transition_seconds
+            data:
+              value: 15
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_light_brightness_pct
+            data:
+              value: 100
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_briefing_timeout_seconds
+            data:
+              value: 120
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ila_alarm_timeout_minutes
+            data:
+              value: 30
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ila_briefing_status
+            data:
+              value: "idle"
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ila_alarm_status
+            data:
+              value: "idle"
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.ila_defaults_applied
 
   # -------------------------------------------------------------------
   # Adapter boundary: Apple wake signal -> normalized ila_wake_detected
@@ -1126,11 +1211,15 @@ automation:
                 data:
                   option: complete
           - conditions:
-              - condition: not
-                conditions:
-                  - condition: state
-                    entity_id: !secret iphone_battery_state_entity
-                    state: "Not Charging"
+              # Fixed: this used to be wrapped in `condition: not`, which
+              # inverted the check — it fired on "still Charging/Full"
+              # (phone never left the charger) and fell through to the
+              # "still waiting" branch on genuine "Not Charging" restarts,
+              # exactly backwards. A restart with the phone still docked
+              # must NOT be treated as an undock.
+              - condition: state
+                entity_id: !secret iphone_battery_state_entity
+                state: "Not Charging"
             sequence:
               # Phone undocked while HA was down. The physical alarm
               # mechanism lives on the phone, not in HA, so it is

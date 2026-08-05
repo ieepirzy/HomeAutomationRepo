@@ -47,10 +47,23 @@ microservices used because they were simple single-purpose HTTP APIs with
 no discovery needs); HA is different enough to warrant it, and it's
 explicitly called out as an option in the original spec.
 
-The one sidecar — the briefing service — stays on the default bridge
-network and publishes only to `127.0.0.1`, since Home Assistant (on the
-host network) reaches it over loopback. It is never reachable from the
-LAN or the internet.
+Of the two sidecars, only `briefing` stays on the default bridge network,
+publishing to `127.0.0.1` only — Home Assistant (on the host network)
+reaches it over loopback, and it's never reachable from the LAN or the
+internet. `wake-gateway` is on `network_mode: host` too, since it needs
+the opposite property (LAN reachability from the phone) — see section 3
+"Wake gateway."
+
+**The callback direction needed its own fix.** `briefing` calling *back*
+into Home Assistant when a briefing finishes (its `callback_url`, POSTed
+from inside the briefing container) can't use `127.0.0.1:8123` the way
+HA's own outbound calls to briefing can — `127.0.0.1` inside a
+bridge-network container is that container itself, not the host, so
+every callback would silently fail to reach HA. `compose.yaml` maps
+`host.docker.internal` to the host gateway on the `briefing` service via
+`extra_hosts` (Docker's portable mechanism for this), and the callback
+URL built in `homeassistant/packages/wakeup_protocol.yaml`'s
+`rest_command` uses that hostname instead of `127.0.0.1`.
 
 ### Secrets: `.env` locally, Portainer stack environment variables in production
 
@@ -363,6 +376,28 @@ entirely independent of Home Assistant's uptime — it's driven by iOS
 Personal Automations, not by HA holding a timer open — so a restart
 during an active alarm doesn't affect whether the phone is still
 sounding; only HA's own bookkeeping needed catching up.
+
+**Two bugs caught in review, both fixed:**
+
+- None of the helpers in this package set `initial:` (deliberately —
+  see the comment above the `input_boolean:` block). Home Assistant's
+  `input_*` helpers only restore their last value across a restart when
+  `initial` is *omitted*; if it's set, the helper force-resets to that
+  value on *every* restart, not just the first one. That silently broke
+  two things before it was caught: `input_boolean.ila_wake_protocol_skip_next`
+  losing a user's pre-bed setting to an overnight Portainer redeploy, and
+  `input_select.ila_wake_state` being reset to `idle` before this very
+  restart-recovery automation's condition ever got to see whatever state
+  a crash had actually left it in — the mechanism described in this
+  section was non-functional until that was fixed. First-boot defaults
+  (which still need to come from *somewhere*) are now applied exactly
+  once by `ila_wakeup_startup_init`, gated on `input_boolean.ila_defaults_applied`
+  rather than baked into the helper definitions.
+- The branch handling "phone undocked while HA was down" had its
+  charger-state check inverted (`condition: not` wrapping the
+  `"Not Charging"` match, instead of matching it directly) — it fired on
+  the phone still being docked and fell through to "still waiting" on a
+  genuine undock, exactly backwards.
 
 ## 9. Test mode
 
