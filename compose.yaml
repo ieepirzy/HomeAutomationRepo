@@ -17,6 +17,12 @@
 #   - The briefing service stays on the default bridge network and only
 #     publishes to 127.0.0.1, since Home Assistant (on the host network)
 #     reaches it via localhost. It is never exposed to the LAN or internet.
+#   - wake-gateway runs on network_mode: host too. Unlike briefing, it
+#     genuinely needs to be reachable from the LAN (iOS Shortcuts on the
+#     phone hits it directly), and it needs to reach Home Assistant's
+#     REST API on the host's loopback address the same way homeassistant
+#     itself does — host networking gets both for free with no explicit
+#     port publishing. See services/wake-gateway/README.md.
 #
 # Persistence summary:
 #   - ./homeassistant is the git-tracked declarative config (YAML only).
@@ -53,6 +59,8 @@ services:
     depends_on:
       briefing:
         condition: service_healthy
+      wake-gateway:
+        condition: service_healthy
 
   briefing:
     build:
@@ -68,11 +76,12 @@ services:
       TZ: ${TZ:-Europe/Helsinki}
       BRIEFING_PORT: 8420
       BRIEFING_AUTH_TOKEN: ${BRIEFING_AUTH_TOKEN:?set BRIEFING_AUTH_TOKEN in .env}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
-      TTS_PROVIDER: ${TTS_PROVIDER:-none}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:?set XAI_API_KEY in .env}
+      XAI_MODEL: ${XAI_MODEL:-grok-4.3}
+      XAI_BASE_URL: ${XAI_BASE_URL:-https://api.x.ai/v1}
+      TTS_PROVIDER: ${TTS_PROVIDER:-xai}
+      XAI_TTS_VOICE_ID: ${XAI_TTS_VOICE_ID:-eve}
+      XAI_TTS_LANGUAGE: ${XAI_TTS_LANGUAGE:-en}
       OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY:-}
       HOME_LAT: ${HOME_LAT:-61.4991}
       HOME_LON: ${HOME_LON:-23.7871}
@@ -84,3 +93,21 @@ services:
       timeout: 10s
       retries: 5
       start_period: 15s
+
+  wake-gateway:
+    build:
+      context: ./services/wake-gateway
+    container_name: wakeup-gateway
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      WAKE_TOKEN: ${WAKE_TOKEN:?set WAKE_TOKEN in .env}
+      UNDOCK_TOKEN: ${UNDOCK_TOKEN:?set UNDOCK_TOKEN in .env}
+      HA_LONG_LIVED_TOKEN: ${HA_LONG_LIVED_TOKEN:?set HA_LONG_LIVED_TOKEN in .env — see services/wake-gateway/README.md}
+      HA_BASE_URL: ${HA_BASE_URL:-http://127.0.0.1:8123}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8422/healthz', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s

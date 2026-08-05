@@ -5,21 +5,28 @@ service behaves identically across compose.yaml / Portainer stack env vars
 import os
 from pathlib import Path
 
-
-def _bool_env(name: str, default: bool = False) -> bool:
-    return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
-
-
 BRIEFING_AUTH_TOKEN = os.environ["BRIEFING_AUTH_TOKEN"]
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5")
+# xAI (Grok) — chat completions API is OpenAI-compatible, so the `openai`
+# SDK is pointed at xAI's base URL rather than pulling in a second SDK.
+# TTS/STT are xAI-native REST endpoints with their own request shape (see
+# tts.py) — not part of the OpenAI-compatible surface.
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
+XAI_BASE_URL = os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1")
+# grok-4.3 is the deliberate default: full 1M context, meaningfully
+# cheaper than grok-4.5 per xAI's published pricing, and this is a short
+# daily generation task that doesn't need the flagship tier. Override to
+# grok-4.5 for quality, or grok-4.1-fast / grok-build-0.1 for the cheapest
+# options, via XAI_MODEL.
+XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4.3")
 
-# One of: none | openai | elevenlabs
-TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "none").strip().lower()
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # "Rachel" default
+# xAI TTS. TTS_PROVIDER stays a switch (not hardcoded to "on") so
+# TTS_PROVIDER=none still works as a zero-cost fallback that hands the
+# raw briefing text to Home Assistant's own TTS engine instead — see
+# tts.py and docs/wakeup-protocol.md "AI Morning Briefing / TTS".
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "xai").strip().lower()
+XAI_TTS_VOICE_ID = os.environ.get("XAI_TTS_VOICE_ID", "eve")
+XAI_TTS_LANGUAGE = os.environ.get("XAI_TTS_LANGUAGE", "en")
 
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "")
 HOME_LAT = os.environ.get("HOME_LAT", "61.4991")

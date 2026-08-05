@@ -138,46 +138,64 @@ exist:
 1. A fixed wake window is defined (`input_datetime.ila_wake_window_start`
    / `_end`, default 05:00–12:00) — outside it, wake events are ignored.
 2. Within that window, an iOS Personal Automation triggers on Sleep Focus
-   ending and calls a Shortcut that `POST`s to Home Assistant's
-   `ila_wake_webhook_id` webhook (see `automation.ila_wakeup_apple_adapter`
-   in the package).
-3. That webhook fires the normalized `ila_wake_detected` event, which is
-   what every downstream automation actually consumes — nothing in the
-   wake-up logic is coupled to how the event got there (spec section 8).
+   ending and calls a Shortcut that hits a plain `GET` endpoint on
+   **`services/wake-gateway`** — a standalone Python service, not a Home
+   Assistant webhook (see "Wake gateway" below for why it's a separate
+   service).
+3. The gateway normalizes that into the `ila_wake_detected` event on
+   Home Assistant's event bus, which is what every downstream automation
+   actually consumes — nothing in the wake-up logic is coupled to how the
+   event got there (spec section 8).
 
 **Documented limitations:**
 
 - **Latency:** typically under a minute from Sleep Focus ending to the
-  webhook firing, but this is bounded by iOS's own automation-execution
-  scheduling, not guaranteed. It is meaningfully faster than "wait for
-  the fixed alarm clock time," which is the property that actually
-  matters here, but it is not sub-second.
+  gateway request landing, but this is bounded by iOS's own
+  automation-execution scheduling, not guaranteed. It is meaningfully
+  faster than "wait for the fixed alarm clock time," which is the
+  property that actually matters here, but it is not sub-second.
 - **Reliability:** Personal Automations can silently fail to fire if
   "Ask Before Running" is left enabled (this must be turned off for the
   automation — Settings > Shortcuts, or per-automation) or if the phone
-  has no network connectivity when it wakes (webhook `POST` fails
-  silently unless the Shortcut checks the response). Set up a low-battery
-  and connectivity check in the Shortcut if this matters to you.
+  has no network connectivity when it wakes (the `GET` fails silently
+  unless the Shortcut checks the response). Set up a low-battery and
+  connectivity check in the Shortcut if this matters to you.
 - **False positives:** ending Sleep Focus manually during the night (to
   check the phone) fires the same automation. The `input_boolean.ila_wake_protocol_skip_next`
   control exists partly for this — set it before an intentional
   middle-of-the-night wake, or just accept an occasional early lights-on
   during the wake window (it cannot fire outside 05:00–12:00 regardless).
 
-**Setup required on the phone** (cannot be done from this repository):
+**Setup required on the phone** (cannot be done from this repository) —
+see `services/wake-gateway/README.md` for the full walkthrough:
 
 1. Shortcuts app → Automation → New Personal Automation → Sleep → "When
    Sleep Focus Turns Off" (or your iOS version's equivalent sleep-wake
    trigger).
-2. Add action: "Get Contents of URL" → `POST` →
-   `http://<home-assistant-host>:8123/api/webhook/<ila_wake_webhook_id>`
-   (the value you put in `secrets.yaml`).
+2. Add action: "Get Contents of URL" → `GET` →
+   `http://<home-assistant-host>:8422/wake/<WAKE_TOKEN>` (the value you
+   put in `.env` / the Portainer stack env vars).
 3. Turn off "Ask Before Running."
-4. If Home Assistant is only reachable on the home network and the
-   webhook needs to work from outside it too (edge case: falling asleep
-   away from home), put Home Assistant behind a VPN (WireGuard, matching
-   the pattern `Loimi` already uses) rather than forwarding port 8123
-   directly to the internet.
+4. If the gateway needs to be reachable from outside the home network too
+   (edge case: falling asleep away from home), put it behind a VPN
+   (WireGuard, matching the pattern `Loimi` already uses) rather than
+   forwarding its port directly to the internet.
+
+### Wake gateway — why a standalone Python service instead of an HA webhook
+
+Home Assistant's own `webhook` automation trigger could have handled
+this identically — it's a legitimate, simpler alternative and was the
+first design in this repo's history. `services/wake-gateway/` exists
+instead per explicit design preference: a small, independently
+testable/loggable Python service that owns exactly this one
+responsibility (receive a `GET` from Shortcuts, normalize it onto Home
+Assistant's event bus) without it being one more automation inside a
+large HA package. It's genuinely a tradeoff, not a strict improvement —
+see `services/wake-gateway/README.md` for the mechanics (it fires events
+via Home Assistant's `POST /api/events/<event_type>` REST endpoint,
+authenticated with a Long-Lived Access Token generated through the HA UI
+after first boot — a manual step, same category as the Companion App
+setup).
 
 ## 4. Phone-only alarm — mechanism and the Watch-dismissal limitation
 
@@ -252,12 +270,14 @@ fixable purely on the Home Assistant side.
 
 Detection: the Companion App's native `sensor.<device>_battery_state`
 entity (Charging / Not Charging / Full), which the app updates in the
-background. This is the primary path from spec section 13. A webhook
-(`ila_undock_webhook_id`) exists as the documented fallback for a
-Shortcut-triggered undock signal, normalized to the same
-`ila_phone_undocked` event, in case the Companion App's battery-state
-sensor proves too laggy in practice (iOS background refresh timing is
-not fully within the app's control).
+background. This is the primary path from spec section 13. A second path
+exists as the documented fallback in case the Companion App's
+battery-state sensor proves too laggy in practice (iOS background
+refresh timing is not fully within the app's control): `services/wake-gateway`'s
+`GET /undock/<UNDOCK_TOKEN>` endpoint (same mechanism as the wake
+detection path in section 3), triggered by a Shortcut on a MagSafe/Qi
+accessory disconnect. Both normalize to the same `ila_phone_undocked`
+event.
 
 Both paths converge on the same normalized event; the completion
 automation (`automation.ila_wakeup_completion`) only *acts* on it while
@@ -269,12 +289,24 @@ charger-contact flapping.
 ## 6. AI morning briefing
 
 Runs as `services/briefing/` — see `services/briefing/README.md` for the
-implementation. Text generation uses the Claude API
-(`claude-opus-5` by default); TTS is pluggable (`none` / `openai` /
-`elevenlabs`) and optional — with `TTS_PROVIDER=none`, Home Assistant
-speaks the generated text through whatever TTS engine you've configured
-natively, so a working briefing doesn't require picking a paid TTS
-vendor.
+implementation. Text generation and TTS both use **xAI (Grok)** — chosen
+for LLM pricing and TTS quality-per-euro over Anthropic/OpenAI/ElevenLabs,
+per household preference. Chat completions go through xAI's
+OpenAI-compatible endpoint (the `openai` SDK pointed at
+`https://api.x.ai/v1`, default model `grok-4.3` — cheaper than the
+flagship `grok-4.5` with the same 1M context, reasonable for a short
+daily generation task; override via `XAI_MODEL` if quality matters more
+than cost for this particular use). TTS uses xAI's own REST endpoint
+directly (`POST /v1/tts`, not OpenAI-compatible). `TTS_PROVIDER=none`
+remains a supported fallback — Home Assistant then speaks the generated
+text through whatever TTS engine you've configured natively, so a
+working briefing never strictly requires a paid TTS call.
+
+xAI also offers a speech-to-text API (`POST /v1/stt`) at $0.10/hour
+batch — not wired into anything yet, since no concrete feature in this
+protocol currently needs it. Left as a documented option if a
+voice-driven feature (e.g. setting today's priorities by speaking
+instead of typing into the dashboard) gets scoped later.
 
 Generation starts the instant the alarm does (`script.ila_start_briefing_generation`,
 fired via `script.turn_on` so it's fire-and-forget) and reports back
@@ -352,17 +384,23 @@ The dashboard's Test Mode card only appears while test mode is enabled.
    branch, build context `/`, compose path `compose.yaml`.
 2. Set the stack's Environment variables from `.env.example` — real
    values, including a freshly generated `BRIEFING_AUTH_TOKEN` and
-   `ANTHROPIC_API_KEY`.
+   `XAI_API_KEY`. For `HA_LONG_LIVED_TOKEN`, use the placeholder for now
+   — it doesn't exist until step 4.
 3. Deploy. On first boot, Home Assistant will not yet have
    `homeassistant/secrets.yaml` — SSH/exec into the host, copy
    `homeassistant/secrets.yaml.example` to `homeassistant/secrets.yaml`
    in the bind-mounted directory, and fill in real values (entity IDs,
-   webhook IDs, the briefing service bridge URL/token). Restart the
-   `homeassistant` container once it exists.
-4. Complete the Companion App setup (mobile_app integration, Critical
+   the briefing service bridge URL/token). Restart the `homeassistant`
+   container once it exists.
+4. Log into Home Assistant → Profile → Security → Long-Lived Access
+   Tokens → Create Token. Update `HA_LONG_LIVED_TOKEN` in the Portainer
+   stack env vars with the real value and redeploy — this is what lets
+   `services/wake-gateway` fire events into Home Assistant (see section 3
+   "Wake gateway").
+5. Complete the Companion App setup (mobile_app integration, Critical
    Alerts permission) and the two iOS Personal Automations from sections
    3 and 4 above.
-5. Redeploy from Portainer ("Pull and redeploy") on every subsequent git
+6. Redeploy from Portainer ("Pull and redeploy") on every subsequent git
    push to update the declarative config; `homeassistant/secrets.yaml`
    and everything under `data/` are untouched by this, per section 2.
 

@@ -26,7 +26,8 @@ homeassistant/              Git-tracked Home Assistant configuration
     wakeup.yaml
   www/briefing/              Briefing audio published here at runtime (gitignored)
 services/
-  briefing/                  LLM + TTS microservice for the morning briefing
+  briefing/                  xAI (Grok) LLM + TTS microservice for the morning briefing
+  wake-gateway/               Standalone Python webhook server for iOS Shortcuts (wake/undock)
 data/                        Runtime data (recorder DB, .storage, briefing cache) — gitignored
 docs/
   wakeup-protocol.md          Design doc, assumptions, setup steps

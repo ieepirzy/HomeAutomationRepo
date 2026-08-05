@@ -1,10 +1,11 @@
 """Morning briefing text generation.
 
 Tone: calm, operational, concise, non-judgmental, non-nagging (spec
-section 14). Uses Claude for the natural-language pass; falls back to a
-deterministic template built from the same structured facts if the LLM
-call fails or refuses, so a broken/rate-limited API key never blocks the
-wake flow — it just produces a plainer briefing.
+section 14). Uses xAI's Grok (via the OpenAI-compatible chat completions
+API) for the natural-language pass; falls back to a deterministic
+template built from the same structured facts if the LLM call fails or
+is refused, so a broken/rate-limited API key never blocks the wake flow
+— it just produces a plainer briefing.
 
 Never invents data: weather and priorities are omitted from both the
 prompt and the template if not supplied.
@@ -14,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-import anthropic
+import openai
 
 from . import config
 
@@ -90,32 +91,30 @@ def _user_prompt(inputs: BriefingInputs) -> str:
 async def generate_briefing_text(inputs: BriefingInputs) -> tuple[str, bool]:
     """Returns (text, used_llm). used_llm is False whenever the
     deterministic fallback was used, for observability/logging."""
-    if not config.ANTHROPIC_API_KEY:
-        logger.info("no ANTHROPIC_API_KEY configured, using deterministic template")
+    if not config.XAI_API_KEY:
+        logger.info("no XAI_API_KEY configured, using deterministic template")
         return build_deterministic_template(inputs), False
 
     try:
-        client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
-        # This is a short, low-stakes daily generation task — effort:low
-        # is the right cost/latency tradeoff (see project docs on
-        # matching effort to task complexity). Adaptive thinking is left
-        # at its default rather than explicitly disabled, since the
-        # target model may reject an explicit "disabled" setting at
-        # higher effort combinations and low effort is cheap regardless.
-        response = await client.messages.create(
-            model=config.ANTHROPIC_MODEL,
+        # xAI's chat completions endpoint is OpenAI-compatible, so the
+        # `openai` SDK works unmodified against it with just a base_url
+        # override — no separate xAI SDK exists or is needed.
+        client = openai.AsyncOpenAI(api_key=config.XAI_API_KEY, base_url=config.XAI_BASE_URL)
+        response = await client.chat.completions.create(
+            model=config.XAI_MODEL,
             max_tokens=300,
-            system=SYSTEM_PROMPT,
-            output_config={"effort": "low"},
-            messages=[{"role": "user", "content": _user_prompt(inputs)}],
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": _user_prompt(inputs)},
+            ],
         )
 
-        if response.stop_reason == "refusal":
+        choice = response.choices[0]
+        if choice.finish_reason == "content_filter":
             logger.warning("briefing generation refused by model, using deterministic template")
             return build_deterministic_template(inputs), False
 
-        text_blocks = [block.text for block in response.content if block.type == "text"]
-        text = " ".join(text_blocks).strip()
+        text = (choice.message.content or "").strip()
         if not text:
             logger.warning("briefing generation returned empty text, using deterministic template")
             return build_deterministic_template(inputs), False

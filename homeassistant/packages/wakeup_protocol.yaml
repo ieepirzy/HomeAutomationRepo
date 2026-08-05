@@ -721,25 +721,17 @@ automation:
 
   # -------------------------------------------------------------------
   # Adapter boundary: Apple wake signal -> normalized ila_wake_detected
-  # event. See docs/wakeup-protocol.md "Apple Watch Wake Detection" for
-  # what actually triggers this webhook and its latency/reliability
-  # limitations — there is no first-party real-time "user woke up" API,
-  # so this is fed by an iOS Shortcuts automation reacting to a Sleep
-  # Focus / Sleep schedule transition.
+  # event. See docs/wakeup-protocol.md "Apple Watch Wake Detection" and
+  # "Wake gateway" for what actually triggers this and its
+  # latency/reliability limitations — there is no first-party real-time
+  # "user woke up" API. The event itself arrives on this bus NOT via an
+  # HA webhook, but via services/wake-gateway (a standalone Python
+  # service) POSTing to Home Assistant's REST events API
+  # (`POST /api/events/ila_wake_detected`) after an iOS Shortcuts
+  # automation hits its `/wake/<token>` endpoint. Nothing here couples to
+  # that — this package only ever consumes the normalized event, exactly
+  # as it would if the event had arrived some other way.
   # -------------------------------------------------------------------
-  - id: ila_wakeup_apple_adapter
-    alias: "Wakeup: Apple wake webhook adapter"
-    mode: queued
-    triggers:
-      - trigger: webhook
-        webhook_id: !secret ila_wake_webhook_id
-        allowed_methods: [POST]
-        local_only: false
-    actions:
-      - event: ila_wake_detected
-        event_data:
-          source: apple_watch
-          detected_at: "{{ now().isoformat() }}"
 
   # -------------------------------------------------------------------
   # Raw signal: companion-app battery state going Charging -> Not
@@ -768,21 +760,10 @@ automation:
           detected_at: "{{ now().isoformat() }}"
 
   # Fallback path: an iOS Shortcut fired directly on charger disconnect
-  # (MagSafe/Qi accessory event, or manual). Same normalized event, so
-  # downstream logic doesn't care which adapter fired.
-  - id: ila_wakeup_undock_shortcut_adapter
-    alias: "Wakeup: undock Shortcut webhook adapter"
-    mode: queued
-    triggers:
-      - trigger: webhook
-        webhook_id: !secret ila_undock_webhook_id
-        allowed_methods: [POST]
-        local_only: false
-    actions:
-      - event: ila_phone_undocked
-        event_data:
-          source: shortcut
-          detected_at: "{{ now().isoformat() }}"
+  # (MagSafe/Qi accessory event, or manual), via services/wake-gateway's
+  # `/undock/<token>` endpoint -> HA's REST events API, same mechanism as
+  # the wake adapter above. Same normalized event, so downstream logic
+  # doesn't care which path fired it.
 
   # -------------------------------------------------------------------
   # Fast path — section 10 of the spec. Every guard is evaluated before

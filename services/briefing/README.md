@@ -5,6 +5,13 @@ wake-up protocol. Runs as its own container so Home Assistant's fast
 path (lights + alarm) never has to wait on an LLM or TTS call — see
 `docs/wakeup-protocol.md` "AI Morning Briefing" for the full design.
 
+Uses **xAI** (Grok) for both text generation and text-to-speech — chosen
+for pricing on the LLM side and native TTS quality-per-euro, per
+household preference (see `docs/wakeup-protocol.md` for the tradeoff
+notes). Chat completions go through xAI's OpenAI-compatible endpoint via
+the `openai` SDK with a `base_url` override; TTS uses xAI's own
+non-OpenAI-compatible REST endpoint directly.
+
 ## Why a separate service at all
 
 Home Assistant's `rest_command`/`tts.speak`/template actions can't do
@@ -23,11 +30,11 @@ straightforward way to get all three without a custom HA integration.
    work in a background task:
    - Weather (if `OPENWEATHER_API_KEY` is set) — omitted if unavailable,
      never invented.
-   - Briefing text via the Claude API (`ANTHROPIC_API_KEY` /
-     `ANTHROPIC_MODEL`) — falls back to a deterministic template built
-     from the same facts if the API call fails, refuses, or returns
-     empty text.
-   - Audio, if `TTS_PROVIDER` is `openai` or `elevenlabs` — written to
+   - Briefing text via xAI's Grok (`XAI_API_KEY` / `XAI_MODEL`, default
+     `grok-4.3`) — falls back to a deterministic template built from the
+     same facts if the API call fails, is refused (`finish_reason ==
+     "content_filter"`), or returns empty text.
+   - Audio, if `TTS_PROVIDER=xai` (the default) — written to
      `PUBLISH_DIR` (bind-mounted into Home Assistant's `www/briefing/`,
      served at `/local/briefing/<file>.mp3`). If `TTS_PROVIDER=none` or
      synthesis fails, no audio is produced; Home Assistant speaks the
@@ -48,12 +55,12 @@ All via environment variables — see `.env.example` at the repo root and
 | Variable | Required | Notes |
 |---|---|---|
 | `BRIEFING_AUTH_TOKEN` | yes | Shared secret checked on every `/generate` call |
-| `ANTHROPIC_API_KEY` | yes | Briefing text generation |
-| `ANTHROPIC_MODEL` | no | Default `claude-opus-5` |
-| `TTS_PROVIDER` | no | `none` (default) / `openai` / `elevenlabs` |
-| `OPENAI_API_KEY` | if `TTS_PROVIDER=openai` | |
-| `ELEVENLABS_API_KEY` | if `TTS_PROVIDER=elevenlabs` | |
-| `ELEVENLABS_VOICE_ID` | no | Default is ElevenLabs' "Rachel" voice |
+| `XAI_API_KEY` | yes | Briefing text generation and TTS |
+| `XAI_MODEL` | no | Default `grok-4.3` — cheaper, full 1M context. `grok-4.5` for quality, `grok-4.1-fast` / `grok-build-0.1` for cheapest/lowest-latency |
+| `XAI_BASE_URL` | no | Default `https://api.x.ai/v1` |
+| `TTS_PROVIDER` | no | `xai` (default) / `none` |
+| `XAI_TTS_VOICE_ID` | no | Default `eve`. List others via `GET https://api.x.ai/v1/tts/voices` |
+| `XAI_TTS_LANGUAGE` | no | BCP-47 code, default `en` |
 | `OPENWEATHER_API_KEY` | no | Omit weather section if unset |
 | `HOME_LAT` / `HOME_LON` | no | Defaults to Tampere, FI |
 | `CACHE_DIR` / `PUBLISH_DIR` | no | Set by compose.yaml; shouldn't need overriding |
@@ -69,7 +76,7 @@ All via environment variables — see `.env.example` at the repo root and
 ```sh
 cd services/briefing
 pip install -r requirements.txt
-BRIEFING_AUTH_TOKEN=test ANTHROPIC_API_KEY=sk-ant-... \
+BRIEFING_AUTH_TOKEN=test XAI_API_KEY=xai-... \
   CACHE_DIR=/tmp/cache PUBLISH_DIR=/tmp/published \
   uvicorn app.main:app --port 8420 --reload
 
