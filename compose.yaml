@@ -42,6 +42,11 @@ services:
     restart: unless-stopped
     network_mode: host
     privileged: false
+    # Ubuntu's docker-default AppArmor profile denies the D-Bus Hello and
+    # AddMatch calls Home Assistant needs for BlueZ. Scope the exception to
+    # this container instead of granting full privileged mode.
+    security_opt:
+      - apparmor=unconfined
     cap_add:
       - NET_ADMIN
       - NET_RAW
