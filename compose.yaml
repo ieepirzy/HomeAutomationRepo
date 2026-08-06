@@ -42,6 +42,9 @@ services:
     restart: unless-stopped
     network_mode: host
     privileged: false
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     volumes:
       - ./homeassistant:/config
       - ./data/homeassistant/storage:/config/.storage
@@ -69,6 +72,7 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:${BRIEFING_PORT:-8420}:8420"
+
     # briefing stays on the bridge network (see the Networking summary
     # above), but it needs to reach the host-networked Home Assistant
     # container to POST its completion callback. host-gateway is
