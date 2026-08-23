@@ -36,6 +36,22 @@
 #   - Nothing under ./data is committed to git (see .gitignore).
 
 services:
+  # LocalTuya is a custom integration, so it is not present in the upstream
+  # Home Assistant image. Install a checksum-pinned release into a separate
+  # runtime bind mount before HA starts. This avoids an untracked HACS install
+  # under the Portainer-managed Git checkout and makes every redeploy
+  # reproducible. See docs/integrations.md.
+  localtuya-installer:
+    build:
+      context: ./services/localtuya-installer
+      args:
+        LOCALTUYA_VERSION: "2025.11.0"
+        LOCALTUYA_SHA256: "d59b9adcf70d942e075a47cf879c0c7b09a4d5ff054617169c2394aa3cd44b41"
+    container_name: localtuya-installer
+    restart: "no"
+    volumes:
+      - ./data/homeassistant/custom_components:/custom_components
+
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:2026.7.4
     container_name: homeassistant
@@ -54,6 +70,7 @@ services:
       - ./homeassistant:/config
       - ./data/homeassistant/storage:/config/.storage
       - ./data/homeassistant/data:/config/data
+      - ./data/homeassistant/custom_components:/config/custom_components
       - /etc/localtime:/etc/localtime:ro
       - /run/dbus:/run/dbus:ro
     environment:
@@ -65,10 +82,59 @@ services:
       retries: 5
       start_period: 120s
     depends_on:
+      localtuya-installer:
+        condition: service_completed_successfully
       briefing:
         condition: service_healthy
       wake-gateway:
         condition: service_healthy
+
+  # Stable semantic read tools for Mira and other agents. This is
+  # intentionally separate from HA's broad Assist MCP surface: only explicitly
+  # configured location, calendar and apartment entities can leave this adapter.
+  # It shares the host network so it can reach HA on 127.0.0.1 without exposing
+  # HA itself on another Docker network. Port 8423 is authenticated separately.
+  mira-home-mcp:
+    build:
+      context: ./services/mira-home-mcp
+    container_name: mira-home-mcp
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      MIRA_HOME_MCP_TOKEN: ${MIRA_HOME_MCP_TOKEN:?set MIRA_HOME_MCP_TOKEN in .env}
+      HA_LONG_LIVED_TOKEN: ${HA_LONG_LIVED_TOKEN:?set HA_LONG_LIVED_TOKEN in .env}
+      HA_BASE_URL: ${HA_BASE_URL:-http://127.0.0.1:8123}
+      HA_LOCATION_ENTITY: ${HA_LOCATION_ENTITY:?set HA_LOCATION_ENTITY in .env}
+      HA_ADDRESS_ENTITY: ${HA_ADDRESS_ENTITY:-}
+      HA_ACTIVITY_ENTITY: ${HA_ACTIVITY_ENTITY:-}
+      HA_CALENDAR_ENTITIES: ${HA_CALENDAR_ENTITIES:-}
+      HA_OCCUPANCY_ENTITIES: ${HA_OCCUPANCY_ENTITIES:-}
+      HA_ENTRY_ENTITIES: ${HA_ENTRY_ENTITIES:-}
+      HA_LIGHT_ENTITIES: ${HA_LIGHT_ENTITIES:-}
+      HA_CLIMATE_ENTITIES: ${HA_CLIMATE_ENTITIES:-}
+      HA_HUMIDITY_ENTITIES: ${HA_HUMIDITY_ENTITIES:-}
+      HA_WEATHER_ENTITIES: ${HA_WEATHER_ENTITIES:-}
+      HA_MEDIA_ENTITIES: ${HA_MEDIA_ENTITIES:-}
+      HA_DESKTOP_ACTIVITY_ENTITIES: ${HA_DESKTOP_ACTIVITY_ENTITIES:-}
+      HA_MODE_ENTITIES: ${HA_MODE_ENTITIES:-}
+      HA_EXTRA_STATE_ENTITIES: ${HA_EXTRA_STATE_ENTITIES:-}
+      GMAIL_IMAP_USERNAME: ${GMAIL_IMAP_USERNAME:-}
+      GMAIL_IMAP_PASSWORD: ${GMAIL_IMAP_PASSWORD:-}
+      GMAIL_IMAP_FOLDERS: ${GMAIL_IMAP_FOLDERS:-INBOX}
+      ICLOUD_IMAP_USERNAME: ${ICLOUD_IMAP_USERNAME:-}
+      ICLOUD_IMAP_PASSWORD: ${ICLOUD_IMAP_PASSWORD:-}
+      ICLOUD_IMAP_FOLDERS: ${ICLOUD_IMAP_FOLDERS:-INBOX}
+      EMAIL_MAX_BODY_BYTES: ${EMAIL_MAX_BODY_BYTES:-524288}
+      EMAIL_MAX_BODY_CHARS: ${EMAIL_MAX_BODY_CHARS:-20000}
+    depends_on:
+      homeassistant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8423/healthz', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
 
   briefing:
     build:

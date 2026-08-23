@@ -27,9 +27,14 @@ homeassistant/              Git-tracked Home Assistant configuration
   www/briefing/              Briefing audio published here at runtime (gitignored)
 services/
   briefing/                  xAI (Grok) LLM + TTS microservice for the morning briefing
+  localtuya-installer/        Pinned LocalTuya custom-integration installer
+  mira-home-mcp/              Read-only semantic Home Assistant tools for Mira
   wake-gateway/               Standalone Python webhook server for iOS Shortcuts (wake/undock)
 data/                        Runtime data (recorder DB, .storage, briefing cache) — gitignored
 docs/
+  integrations.md             Provisioning runbook for WiZ and LocalTuya
+  mira-home-mcp.md             Native HA MCP plus Mira's narrow semantic adapter
+  mira-voice.md                Finnish-first speech and xAI rendering controls
   wakeup-protocol.md          Design doc, assumptions, setup steps
 ```
 
@@ -42,6 +47,14 @@ then copy `homeassistant/secrets.yaml.example` to
 `homeassistant/secrets.yaml` on the host and fill in real values (that
 file is intentionally not managed by git — see `docs/wakeup-protocol.md`
 §2 "Persistence").
+
+To add the apartment's WiZ and LocalTuya devices, follow
+[`docs/integrations.md`](docs/integrations.md). Device entries are provisioned
+in the Home Assistant UI; do not add credentials to the tracked YAML files.
+
+To connect explicitly authorized agents to semantic Home Assistant state,
+including precise phone location when available, follow
+[`docs/mira-home-mcp.md`](docs/mira-home-mcp.md).
 
 ## History
 
