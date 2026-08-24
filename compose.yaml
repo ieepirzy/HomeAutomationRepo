@@ -52,6 +52,20 @@ services:
     volumes:
       - ./data/homeassistant/custom_components:/custom_components
 
+  # Install Xiaomi Miot into the runtime-only custom_components mount too.
+  # Device host/token configuration is entered through HA's local config flow
+  # and persists in /config/.storage, never in this Git checkout or image.
+  xiaomi-miot-installer:
+    build:
+      context: ./services/xiaomi-miot-installer
+      args:
+        XIAOMI_MIOT_VERSION: "1.1.4"
+        XIAOMI_MIOT_SHA256: "4717739a34ede653a1a06eb2185beeb82fdefe8423cde29ed7cff7292980a5a3"
+    container_name: xiaomi-miot-installer
+    restart: "no"
+    volumes:
+      - ./data/homeassistant/custom_components:/custom_components
+
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:2026.7.4
     container_name: homeassistant
@@ -83,6 +97,8 @@ services:
       start_period: 120s
     depends_on:
       localtuya-installer:
+        condition: service_completed_successfully
+      xiaomi-miot-installer:
         condition: service_completed_successfully
       briefing:
         condition: service_healthy

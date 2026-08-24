@@ -30,6 +30,7 @@ services/
   localtuya-installer/        Pinned LocalTuya custom-integration installer
   mira-home-mcp/              Read-only semantic Home Assistant tools for Mira
   wake-gateway/               Standalone Python webhook server for iOS Shortcuts (wake/undock)
+  xiaomi-miot-installer/       Pinned Xiaomi Miot custom-integration installer
 data/                        Runtime data (recorder DB, .storage, briefing cache) — gitignored
 docs/
   integrations.md             Provisioning runbook for WiZ and LocalTuya
@@ -48,7 +49,7 @@ then copy `homeassistant/secrets.yaml.example` to
 file is intentionally not managed by git — see `docs/wakeup-protocol.md`
 §2 "Persistence").
 
-To add the apartment's WiZ and LocalTuya devices, follow
+To add the apartment's WiZ, LocalTuya, and Xiaomi Miot devices, follow
 [`docs/integrations.md`](docs/integrations.md). Device entries are provisioned
 in the Home Assistant UI; do not add credentials to the tracked YAML files.
 

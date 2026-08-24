@@ -5,9 +5,9 @@ pairing in Home Assistant's UI-managed config entries. Their state is written
 to `/config/.storage`, which `compose.yaml` persists from
 `data/homeassistant/storage` outside the Git working tree.
 
-Do not add device IDs, local keys, or cloud credentials to
-`configuration.yaml`, `secrets.yaml`, the Portainer environment, or Git. WiZ
-and LocalTuya config entries are both created through the Home Assistant UI.
+Do not add device IDs, local keys, or cloud credentials to tracked YAML or Git.
+WiZ, LocalTuya, and Xiaomi Miot config entries are created through the Home
+Assistant UI and persist in the separately mounted `/config/.storage`.
 
 ## WiZ
 
@@ -68,6 +68,42 @@ Only block a device's internet access after local control and state updates have
 been tested through a power cycle. LocalTuya being local does not guarantee that
 every vendor firmware remains fully functional without internet access.
 
+## Xiaomi Miot
+
+This deployment installs the community-maintained
+[`al-one/hass-xiaomi-miot`](https://github.com/al-one/hass-xiaomi-miot)
+integration from a checksum-pinned release before Home Assistant starts. The
+custom component is reproducible from Git, while each device's local token stays
+inside HA's persistent `/config/.storage` rather than tracked configuration.
+
+For the Xiaomi Smart Humidifier 2 EU (`deerma.humidifier.jsq2w`):
+
+1. Pair the humidifier in Xiaomi Home long enough to provision Wi-Fi, then give
+   it a DHCP reservation.
+2. Deploy this stack and confirm the `xiaomi-miot-installer` one-shot container
+   reports version `1.1.4` and exits successfully.
+3. Obtain the 32-character local token inside HA: temporarily add **Xiaomi Miot
+   → Add devices using Mi Account**, then call the
+   `xiaomi_miot.get_token` action from **Developer tools → Actions** with the
+   humidifier name, IP, or model as `name`. Copy the token from the action
+   response directly into a password manager. Remove the temporary account-based
+   Xiaomi Miot entry afterward; do not paste the token into logs, chat, or Git.
+4. Add **Xiaomi Miot** again and select **Add device using host/token (LAN
+   integration)**. Enter the reserved
+   LAN IP and local token. Let the integration detect the model; if manual input
+   is required, use `deerma.humidifier.jsq2w`.
+5. The final entry must not contain a Xiaomi account or use Cloud mode. If
+   connection mode is offered, select **Local**.
+6. Verify power, preset/mode, target humidity, current humidity, temperature,
+   water state, and recovery after both an HA restart and a humidifier power
+   cycle.
+
+The integration can fetch public MIoT schema metadata, but device state and
+commands use the LAN host/token path. Only deny the humidifier internet access
+after the restart and power-cycle checks pass. Keep DHCP and local HA-to-device
+traffic available; miIO commonly uses UDP port 54321. If the device needs time,
+provide a local NTP service rather than restoring general WAN access.
+
 ## Verification and persistence
 
 For each integration:
@@ -83,8 +119,9 @@ For each integration:
    `/config/custom_components`; do not attempt to reconstruct their files in
    Git.
 
-Official references: [WiZ integration](https://www.home-assistant.io/integrations/wiz/)
-and [LocalTuya documentation](https://xzetsubou.github.io/hass-localtuya/).
+References: [WiZ integration](https://www.home-assistant.io/integrations/wiz/),
+[LocalTuya documentation](https://xzetsubou.github.io/hass-localtuya/), and
+[Xiaomi Miot](https://github.com/al-one/hass-xiaomi-miot).
 
 ## Personal information integrations
 
