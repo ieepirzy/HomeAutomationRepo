@@ -27,6 +27,7 @@ homeassistant/              Git-tracked Home Assistant configuration
   www/briefing/              Briefing audio published here at runtime (gitignored)
 services/
   briefing/                  xAI (Grok) LLM + TTS microservice for the morning briefing
+  healthsync-installer/       Pinned HealthSync custom-integration installer
   localtuya-installer/        Pinned LocalTuya custom-integration installer
   mira-home-mcp/              Read-only semantic Home Assistant tools for Mira
   wake-gateway/               Standalone Python webhook server for iOS Shortcuts (wake/undock)
@@ -34,6 +35,7 @@ services/
 data/                        Runtime data (recorder DB, .storage, briefing cache) — gitignored
 docs/
   integrations.md             Provisioning runbook for WiZ and LocalTuya
+  integration-shortlist.md    Living evaluation list for optional integrations
   mira-home-mcp.md             Native HA MCP plus Mira's narrow semantic adapter
   mira-voice.md                Finnish-first speech and xAI rendering controls
   wakeup-protocol.md          Design doc, assumptions, setup steps
@@ -49,7 +51,7 @@ then copy `homeassistant/secrets.yaml.example` to
 file is intentionally not managed by git — see `docs/wakeup-protocol.md`
 §2 "Persistence").
 
-To add the apartment's WiZ, LocalTuya, and Xiaomi Miot devices, follow
+To add the apartment's WiZ, LocalTuya, Xiaomi Miot, and HealthSync integrations, follow
 [`docs/integrations.md`](docs/integrations.md). Device entries are provisioned
 in the Home Assistant UI; do not add credentials to the tracked YAML files.
 

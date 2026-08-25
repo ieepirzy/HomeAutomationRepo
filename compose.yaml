@@ -66,6 +66,20 @@ services:
     volumes:
       - ./data/homeassistant/custom_components:/custom_components
 
+  # Install the local-push HealthSync receiver without adding HACS. HealthKit
+  # permissions and the webhook shared secret are configured in the iOS app
+  # and HA config flow; only the checksum-pinned integration code lives here.
+  healthsync-installer:
+    build:
+      context: ./services/healthsync-installer
+      args:
+        HEALTHSYNC_VERSION: "0.20.5"
+        HEALTHSYNC_SHA256: "ee8517690e77835f7228587ce7d0f7a0cec00d0abfe73aceb3151da0a4a341e6"
+    container_name: healthsync-installer
+    restart: "no"
+    volumes:
+      - ./data/homeassistant/custom_components:/custom_components
+
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:2026.7.4
     container_name: homeassistant
@@ -96,6 +110,8 @@ services:
       retries: 5
       start_period: 120s
     depends_on:
+      healthsync-installer:
+        condition: service_completed_successfully
       localtuya-installer:
         condition: service_completed_successfully
       xiaomi-miot-installer:

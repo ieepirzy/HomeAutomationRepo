@@ -129,6 +129,37 @@ These integrations are UI-managed for the same reason as device integrations:
 their Apple/Google credentials must remain in Home Assistant's private
 `.storage`, not tracked YAML or Portainer environment variables.
 
+### Apple Health through HealthSync
+
+Compose installs
+[`mannotfood/healthsync`](https://github.com/mannotfood/healthsync) from a
+checksum-pinned release into the runtime `custom_components` mount. HACS is
+not required. Health data is pushed directly from the HealthSync iOS app to a
+per-entry Home Assistant webhook; no vendor relay is part of that path.
+
+1. Redeploy the stack and confirm `healthsync-installer` reports version
+   `0.20.5` and exits successfully. Restart Home Assistant if Portainer did not
+   recreate it after the installer completed.
+2. In **Settings -> Devices & services -> Add integration**, add
+   **HealthSync**, name the entry `Ilari`, and configure a strong random shared
+   secret. Store that secret in a password manager, not Git or Portainer.
+3. Copy the complete generated webhook URL into **HealthSync -> Settings ->
+   Home Assistant** on the iPhone and enter the same shared secret. For
+   delivery over the WireGuard mesh, retain the generated `/api/webhook/...`
+   path and use `http://10.8.0.8:8123` as its origin.
+4. Use **Test Connection** and require the corresponding successful-test
+   notification in HA before granting broad HealthKit access.
+5. Initially authorize and manually sync only sleep, steps, active calories,
+   resting heart rate, HRV, and workouts. Avoid a full historical import and
+   high-frequency heart-rate history until storage growth has been measured.
+
+HealthSync archives every received sample indefinitely in a separate SQLite
+database under `/config/.storage`, independent of HA recorder retention. That
+database is included in backups and the current integration has no retention
+setting. Treat backups as health data, keep the webhook and shared secret
+private, and expose only explicitly selected derived entities to Mira rather
+than its raw readings service or event stream.
+
 ### iCloud Calendar through CalDAV
 
 1. Generate an Apple app-specific password.
@@ -148,22 +179,28 @@ events inferred from mail.
 
 ### Read-only email
 
-Add one **IMAP** integration entry per provider:
+Do not add duplicate Home Assistant **IMAP** entries for Mira v1. General
+mailbox reading is implemented directly in `mira-home-mcp`, because Mira needs
+bounded metadata search and explicit retrieval of an individual message by a
+stable opaque locator. HA's IMAP integration is oriented around mailbox state
+and `imap_content` events; it is not the general search-and-fetch tool surface.
+
+Configure the direct read-only accounts in Portainer instead:
 
 - Gmail uses `imap.gmail.com` on port `993`, SSL, and a Google app password.
 - iCloud Mail uses `imap.mail.me.com` on port `993`, SSL, the iCloud username
   (or full address if required), and an Apple app-specific password.
 
-The agent-facing read path is general: it may search/list mailbox metadata and
-fetch any individual email by stable ID. It is not limited to bills, events, or
-preselected senders. Keep mailbox actions such as delete, move or mark-seen
-outside the read-only agent surface even though HA's IMAP integration supports
-them.
+The agent-facing path may search/list mailbox metadata and fetch any individual
+email by stable ID. It is not limited to bills, events, or preselected senders.
+It uses read-only mailbox selection and non-mutating fetches; delete, move,
+mark-seen and send operations remain absent.
 
-No incoming email starts Mira in v1. HA's `imap_content` events are merely a
-possible source for a later trigger/subscription design; do not connect them to
-the agent runner yet. This does not limit what Mira can retrieve through an
-explicit read tool call during an already-running turn.
+No incoming email starts Mira in v1. An HA IMAP entry may be added later if its
+`imap_content` event becomes a deliberately filtered source for the separate
+trigger/subscription design, but do not add it merely to duplicate the direct
+reader. This does not limit what Mira can retrieve through an explicit tool
+call during an already-running turn.
 
 Do not forward arbitrary email bodies into an agent prompt. Messages are
 untrusted input and may contain prompt injection; body retrieval should be an
@@ -176,7 +213,7 @@ Outbound Gmail and iCloud Mail are planned, not enabled. Gmail can use the
 access; sending receives the stricter authority.
 
 Official references: [CalDAV](https://www.home-assistant.io/integrations/caldav/),
-[Google Mail](https://www.home-assistant.io/integrations/google_mail/), and
+[Google Mail](https://www.home-assistant.io/integrations/google_mail/),
 [IMAP](https://www.home-assistant.io/integrations/imap/),
 [SMTP](https://www.home-assistant.io/integrations/smtp/), and
 [Apple's iCloud Mail server settings](https://support.apple.com/en-ie/102525).
