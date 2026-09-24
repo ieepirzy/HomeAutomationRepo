@@ -4,6 +4,7 @@ Read-only semantic tools backed by Home Assistant:
 
 - `get_location()`
 - `get_calendar_events(day_offset=1, days=1, include_locations=false)`
+- `get_week(week_offset=0, include_locations=false)`
 - `get_home_state()`
 - `search_emails(query="", account=null, folder=null, limit=20)`
 - `get_email(locator, include_body=true)`
@@ -37,6 +38,10 @@ agent boundary by attaching this MCP only to agents that require home context.
 Speed is reported when present, with a cautious motion label. The adapter never
 claims that Ila is driving based solely on speed.
 
+Calendar day and week boundaries use `MIRA_HOME_TIMEZONE` (IANA name, default
+`Europe/Helsinki`), never the container's zone. See `docs/mira-home-mcp.md`
+for the calendar contract.
+
 ## Run locally
 
 Set the variables documented in `.env.example`, then:
@@ -48,6 +53,13 @@ docker compose --env-file .env up --build mira-home-mcp
 The Streamable HTTP endpoint is `http://<home-host>:8423/mcp`; send
 `Authorization: Bearer <MIRA_HOME_MCP_TOKEN>`. Keep it on the LAN or WireGuard.
 Do not forward port 8423 directly to the public internet.
+
+Tests use a fake Home Assistant client and `httpx.MockTransport`:
+
+```bash
+uv run --no-project --with-requirements requirements.txt \
+  --with pytest --with pytest-asyncio python -m pytest -q
+```
 
 The health endpoint is unauthenticated at `/healthz` and reveals only service
 health, not Home Assistant connectivity or state.

@@ -133,6 +133,11 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
+      # TZ only affects logs/libc here; calendar day and week boundaries use
+      # MIRA_HOME_TIMEZONE explicitly (default Europe/Helsinki) so they never
+      # depend on the container clock zone.
+      TZ: ${TZ:-Europe/Helsinki}
+      MIRA_HOME_TIMEZONE: ${MIRA_HOME_TIMEZONE:-Europe/Helsinki}
       MIRA_HOME_MCP_TOKEN: ${MIRA_HOME_MCP_TOKEN:?set MIRA_HOME_MCP_TOKEN in .env}
       HA_LONG_LIVED_TOKEN: ${HA_LONG_LIVED_TOKEN:?set HA_LONG_LIVED_TOKEN in .env}
       HA_BASE_URL: ${HA_BASE_URL:-http://127.0.0.1:8123}

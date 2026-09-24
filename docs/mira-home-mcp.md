@@ -46,8 +46,50 @@ Copy the `Mira Home MCP` variables from `.env.example` into the Portainer stack:
 - `HA_ADDRESS_ENTITY`: optional geocoded-location sensor.
 - `HA_ACTIVITY_ENTITY`: optional Companion Activity sensor.
 - `HA_CALENDAR_ENTITIES`: comma-separated calendar allowlist.
+- `MIRA_HOME_TIMEZONE`: IANA zone for calendar day/week boundaries, default
+  `Europe/Helsinki`. Compose passes it (and `TZ`) explicitly; the code never
+  relies on the container's clock zone or `/etc/localtime`. An unknown zone
+  stops the adapter at startup.
 - `HA_*_ENTITIES`: semantic allowlists for occupancy, entries, lights, climate,
   humidity, weather, media, desktop activity, modes and extra state.
+
+## Calendar tools
+
+Both tools read only the `HA_CALENDAR_ENTITIES` allowlist through
+`GET /api/calendars/<entity_id>`, in parallel, and never return event
+descriptions. Locations are opt-in with `include_locations=true`.
+
+- `get_calendar_events(day_offset=1, days=1, include_locations=false)`: a flat,
+  instant-sorted list for local days (`day_offset` 0..14, `days` 1..7), capped at
+  100 events.
+- `get_week(week_offset=0, include_locations=false)`: an ISO week, Monday to
+  Sunday, `week_offset` -52..52. Returns `iso_year` (the ISO week-year, which
+  differs from the calendar year around New Year: 2024-12-30 is 2025-W01 and
+  2027-01-01 is 2026-W53), `iso_week`, `start_date`, `end_date` (Sunday,
+  inclusive), `timezone`, `retrieved_at`, per-calendar `calendars` status,
+  `event_count`, `truncated` (cap 300) and seven `days`, each with `date`,
+  `weekday`, `all_day` and timed `events`.
+
+Shared semantics:
+
+- Day boundaries are local midnights in `MIRA_HOME_TIMEZONE`, so DST days are
+  23 or 25 hours long; HA is queried with offset-bearing ISO instants.
+- Timed events carry `start`/`end` ISO timestamps with offsets, rendered in the
+  configured zone. All-day events carry `start_date`, `end_date_exclusive`
+  (HA/iCalendar all-day ends are exclusive: a one-day event on the 5th ends on
+  the 6th) and the inclusive convenience `last_date`.
+- In `get_week`, an event appears on every day it overlaps. Timed events flag
+  `starts_before_day`/`ends_after_day` when they cross midnight.
+- Events sort by real instant (all-day first at the same instant), not by the
+  string HA returned.
+- `calendar` is the entity ID; the events endpoint carries no friendly name and
+  the adapter does not make an extra call for one.
+- A failing calendar never fails the whole read: the result has
+  `status: "partial"`, a `warning`, and `ok: false` plus `error` on that
+  calendar's `calendars` entry. If every calendar fails, the tool returns
+  `ok: false, status: "error"` and no events; it never reports a free week it
+  could not read. Malformed events are skipped and counted as
+  `skipped_malformed`.
 
 After deployment, connect Mira to `http://<home-host>:8423/mcp` over the LAN or
 WireGuard using `MIRA_HOME_MCP_TOKEN`.
