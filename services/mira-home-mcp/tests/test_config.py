@@ -70,3 +70,25 @@ def test_partial_email_credentials_fail_closed():
         assert "must be set together" in str(exc)
     else:
         raise AssertionError("partial IMAP credentials were accepted")
+
+
+def test_timezone_defaults_to_helsinki_and_ignores_container_tz():
+    config = Config.from_env({**BASE_ENV, "TZ": "UTC"})
+
+    assert config.timezone == "Europe/Helsinki"
+    assert config.zone.key == "Europe/Helsinki"
+
+
+def test_timezone_is_configurable():
+    config = Config.from_env({**BASE_ENV, "MIRA_HOME_TIMEZONE": "America/New_York"})
+
+    assert config.zone.key == "America/New_York"
+
+
+def test_unknown_timezone_fails_at_startup():
+    try:
+        Config.from_env({**BASE_ENV, "MIRA_HOME_TIMEZONE": "Mars/Olympus_Mons"})
+    except RuntimeError as exc:
+        assert "MIRA_HOME_TIMEZONE" in str(exc)
+    else:
+        raise AssertionError("an unknown time zone was accepted")

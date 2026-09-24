@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+DEFAULT_TIMEZONE = "Europe/Helsinki"
 
 
 def _csv(value: str | None) -> tuple[str, ...]:
@@ -48,6 +51,13 @@ class Config:
     email_max_body_bytes: int = 524_288
     email_max_body_chars: int = 20_000
     request_timeout_seconds: float = 10.0
+    # IANA zone for local-day/week boundaries. Deliberately explicit: the
+    # container's own TZ and /etc/localtime must not decide what "tomorrow" is.
+    timezone: str = DEFAULT_TIMEZONE
+
+    @property
+    def zone(self) -> ZoneInfo:
+        return ZoneInfo(self.timezone)
 
     @property
     def home_state_groups(self) -> dict[str, tuple[str, ...]]:
@@ -103,6 +113,14 @@ class Config:
         if email_max_body_bytes < 1 or email_max_body_chars < 1:
             raise RuntimeError("EMAIL_MAX_BODY_BYTES and EMAIL_MAX_BODY_CHARS must be positive")
 
+        timezone = (env.get("MIRA_HOME_TIMEZONE") or DEFAULT_TIMEZONE).strip()
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise RuntimeError(
+                f"MIRA_HOME_TIMEZONE must be an IANA time zone name, got {timezone!r}"
+            ) from exc
+
         return cls(
             mcp_token=env["MIRA_HOME_MCP_TOKEN"],
             ha_token=env["HA_LONG_LIVED_TOKEN"],
@@ -129,4 +147,5 @@ class Config:
             email_max_body_bytes=email_max_body_bytes,
             email_max_body_chars=email_max_body_chars,
             request_timeout_seconds=float(env.get("HA_REQUEST_TIMEOUT_SECONDS", "10")),
+            timezone=timezone,
         )

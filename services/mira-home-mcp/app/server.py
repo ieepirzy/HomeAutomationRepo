@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -12,6 +12,13 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from starlette.requests import Request
 
+from .calendar_view import (
+    WEEK_OFFSET_LIMIT,
+    build_week,
+    fetch_calendars,
+    fetch_status_fields,
+    local_window,
+)
 from .config import Config
 from .email_reader import EmailReadError, EmailReader
 from .ha_client import HomeAssistantClient, HomeAssistantReadError
@@ -111,6 +118,11 @@ async def get_location() -> dict:
     return result
 
 
+def _now(zone):
+    """Current time in the configured zone; a seam for tests."""
+    return datetime.now(zone)
+
+
 @mcp.tool(annotations=READ_ONLY, timeout=20)
 async def get_calendar_events(
     day_offset: int = 1,
@@ -119,8 +131,12 @@ async def get_calendar_events(
 ) -> dict:
     """Get events from the allowlisted HA calendars for a local-day window.
 
-    day_offset=1 and days=1 means tomorrow. Descriptions are deliberately omitted;
-    event locations are returned only when include_locations is true.
+    day_offset=1 and days=1 means tomorrow, in the configured time zone
+    (MIRA_HOME_TIMEZONE, default Europe/Helsinki). Timed events carry ISO
+    start/end with offsets; all-day events carry start_date and an EXCLUSIVE
+    end_date_exclusive (plus inclusive last_date). Descriptions are deliberately
+    omitted; event locations are returned only when include_locations is true.
+    status is "partial" when some calendars failed; ok=false when all failed.
     """
     if not 0 <= day_offset <= 14:
         return {"ok": False, "error": "day_offset must be between 0 and 14"}
@@ -129,42 +145,63 @@ async def get_calendar_events(
     if not config.calendar_entities:
         return {"ok": False, "error": "no Home Assistant calendars are allowlisted"}
 
-    now = datetime.now().astimezone()
-    start_date = now.date() + timedelta(days=day_offset)
-    start = datetime.combine(start_date, time.min, tzinfo=now.tzinfo)
-    end = start + timedelta(days=days)
-    try:
-        responses = await asyncio.gather(
-            *(
-                ha.get_calendar_events(entity_id, start=start, end=end)
-                for entity_id in config.calendar_entities
-            )
-        )
-    except HomeAssistantReadError as exc:
-        return _failed(exc)
-
-    events: list[dict] = []
-    for entity_id, calendar_events in zip(config.calendar_entities, responses, strict=True):
-        for event in calendar_events:
-            item = {
-                "calendar": entity_id,
-                "summary": event.get("summary"),
-                "start": event.get("start"),
-                "end": event.get("end"),
-            }
-            if include_locations and event.get("location"):
-                item["location"] = event["location"]
-            events.append(item)
-    events.sort(key=lambda event: str(event.get("start", "")))
-    truncated = len(events) > 100
-    return {
-        "ok": True,
+    zone = config.zone
+    now = _now(zone)
+    start, end = local_window(now.date() + timedelta(days=day_offset), days, zone)
+    fetch = await fetch_calendars(ha, config.calendar_entities, start, end, zone)
+    status = fetch_status_fields(fetch)
+    window = {
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "timezone": str(now.tzinfo),
-        "events": events[:100],
-        "truncated": truncated,
+        "timezone": zone.key,
+        "retrieved_at": now.isoformat(),
     }
+    if not status["ok"]:
+        return {**status, **window, "calendars": fetch.statuses}
+    return {
+        **status,
+        **window,
+        "calendars": fetch.statuses,
+        "events": [
+            event.as_dict(zone, include_locations=include_locations)
+            for event in fetch.events[:100]
+        ],
+        "truncated": len(fetch.events) > 100,
+    }
+
+
+@mcp.tool(annotations=READ_ONLY, timeout=20)
+async def get_week(week_offset: int = 0, include_locations: bool = False) -> dict:
+    """Get an ISO week (Monday-Sunday) of allowlisted HA calendar events by day.
+
+    week_offset=0 is the current week, -1 last week, 1 next week (range -52..52),
+    in the configured time zone. iso_year is the ISO week-year, which can differ
+    from the calendar year around New Year. Each of the 7 days lists all_day and
+    timed events; events spanning several days appear on every day they overlap
+    (timed ones flag starts_before_day / ends_after_day). All-day end dates are
+    EXCLUSIVE (end_date_exclusive); last_date is inclusive. Descriptions are
+    never returned; locations only when include_locations is true. status is
+    "partial" when some calendars failed (see calendars[].error); ok=false when
+    all failed, which never means a free week.
+    """
+    if isinstance(week_offset, bool) or not isinstance(week_offset, int):
+        return {"ok": False, "error": "week_offset must be an integer"}
+    if not -WEEK_OFFSET_LIMIT <= week_offset <= WEEK_OFFSET_LIMIT:
+        return {
+            "ok": False,
+            "error": f"week_offset must be between -{WEEK_OFFSET_LIMIT} and {WEEK_OFFSET_LIMIT}",
+        }
+    if not config.calendar_entities:
+        return {"ok": False, "error": "no Home Assistant calendars are allowlisted"}
+    zone = config.zone
+    return await build_week(
+        ha,
+        config.calendar_entities,
+        zone,
+        week_offset=week_offset,
+        include_locations=include_locations,
+        now=_now(zone),
+    )
 
 
 @mcp.tool(annotations=READ_ONLY, timeout=15)

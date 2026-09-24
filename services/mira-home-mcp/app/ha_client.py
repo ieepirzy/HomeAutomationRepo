@@ -13,14 +13,24 @@ class HomeAssistantReadError(RuntimeError):
 
 
 class HomeAssistantClient:
-    def __init__(self, *, base_url: str, token: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        timeout_seconds: float,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {token}"}
         self._timeout = timeout_seconds
+        self._transport = transport  # tests inject httpx.MockTransport
 
     async def _get(self, path: str, *, params: dict[str, str] | None = None):
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self._timeout, transport=self._transport
+            ) as client:
                 response = await client.get(
                     f"{self._base_url}{path}", headers=self._headers, params=params
                 )
