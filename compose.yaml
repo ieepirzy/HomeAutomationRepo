@@ -81,7 +81,7 @@ services:
       - ./data/homeassistant/custom_components:/custom_components
 
   homeassistant:
-    image: ghcr.io/home-assistant/home-assistant:2026.7.4
+    image: ghcr.io/home-assistant/home-assistant:2026.9.3
     container_name: homeassistant
     restart: unless-stopped
     network_mode: host
