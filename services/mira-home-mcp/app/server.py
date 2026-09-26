@@ -12,6 +12,7 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from starlette.requests import Request
 
+from .calendar_events import shape_event
 from .config import Config
 from .email_reader import EmailReadError, EmailReader
 from .ha_client import HomeAssistantClient, HomeAssistantReadError
@@ -115,12 +116,13 @@ async def get_location() -> dict:
 async def get_calendar_events(
     day_offset: int = 1,
     days: int = 1,
-    include_locations: bool = False,
+    include_locations: bool = True,
 ) -> dict:
     """Get events from the allowlisted HA calendars for a local-day window.
 
-    day_offset=1 and days=1 means tomorrow. Descriptions are deliberately omitted;
-    event locations are returned only when include_locations is true.
+    day_offset=1 and days=1 means tomorrow. Every event comes with its location
+    and description when it has them (descriptions capped at 4000 chars).
+    include_locations is accepted for older callers and ignored.
     """
     if not 0 <= day_offset <= 14:
         return {"ok": False, "error": "day_offset must be between 0 and 14"}
@@ -146,15 +148,7 @@ async def get_calendar_events(
     events: list[dict] = []
     for entity_id, calendar_events in zip(config.calendar_entities, responses, strict=True):
         for event in calendar_events:
-            item = {
-                "calendar": entity_id,
-                "summary": event.get("summary"),
-                "start": event.get("start"),
-                "end": event.get("end"),
-            }
-            if include_locations and event.get("location"):
-                item["location"] = event["location"]
-            events.append(item)
+            events.append(shape_event(entity_id, event))
     events.sort(key=lambda event: str(event.get("start", "")))
     truncated = len(events) > 100
     return {
