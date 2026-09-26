@@ -159,8 +159,10 @@ does not know whether they came from iCloud, Google, a local calendar, or a
 future direct adapter. If iCloud CalDAV proves unreliable, its replacement does
 not change `get_calendar_events()` or the Sleep Focus bedtime automation.
 
-The tool omits event descriptions, caps results at 100, and returns event
-locations only when the caller explicitly asks for them.
+The tool caps results at 100 and always returns each event's location and
+description when it has them (descriptions capped at 4000 characters). Only
+Ilari and the feeds he subscribes to write these calendars, and the details
+(addresses, prep notes, assignment text) are what Mira plans with (2026-09-26).
 
 CalDAV refreshes on roughly a 15-minute cadence, so it is suitable for bedtime
 and morning planning but not second-precise alarms. Treat the HA CalDAV surface
