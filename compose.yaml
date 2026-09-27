@@ -23,6 +23,9 @@
 #     REST API on the host's loopback address the same way homeassistant
 #     itself does — host networking gets both for free with no explicit
 #     port publishing. See services/wake-gateway/README.md.
+#   - mosquitto stays on the bridge network but publishes 1883 on all
+#     interfaces so HASS.Agent on the Windows PC can reach it over the
+#     LAN. Home Assistant reaches it at 127.0.0.1:1883. Auth is required.
 #
 # Persistence summary:
 #   - ./homeassistant is the git-tracked declarative config (YAML only).
@@ -120,6 +123,36 @@ services:
         condition: service_healthy
       wake-gateway:
         condition: service_healthy
+
+  # MQTT broker for HASS.Agent on the Windows PC (and anything else that
+  # speaks MQTT). HASS.Agent publishes its sensors via MQTT discovery and
+  # receives commands the same way; HA's MQTT integration is added in the UI
+  # pointing at 127.0.0.1:1883. Unlike briefing, this port is intentionally
+  # published on all interfaces because the PC connects over the LAN.
+  # Anonymous access is disabled; HA and HASS.Agent get separate credentials
+  # so the Windows side can be rotated independently. Retained discovery
+  # messages persist in ./data/mosquitto. See docs/integrations.md.
+  mosquitto:
+    build:
+      context: ./services/mosquitto
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./data/mosquitto/data:/mosquitto/data
+    environment:
+      TZ: ${TZ:-Europe/Helsinki}
+      MQTT_HA_USERNAME: ${MQTT_HA_USERNAME:-homeassistant}
+      MQTT_HA_PASSWORD: ${MQTT_HA_PASSWORD:?set MQTT_HA_PASSWORD in .env}
+      MQTT_AGENT_USERNAME: ${MQTT_AGENT_USERNAME:-hassagent}
+      MQTT_AGENT_PASSWORD: ${MQTT_AGENT_PASSWORD:?set MQTT_AGENT_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -u \"$$MQTT_HA_USERNAME\" -P \"$$MQTT_HA_PASSWORD\" -t '$$SYS/broker/uptime' -C 1 -W 5 >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
 
   # Stable semantic read tools for Mira and other agents. This is
   # intentionally separate from HA's broad Assist MCP surface: only explicitly

@@ -104,6 +104,36 @@ after the restart and power-cycle checks pass. Keep DHCP and local HA-to-device
 traffic available; miIO commonly uses UDP port 54321. If the device needs time,
 provide a local NTP service rather than restoring general WAN access.
 
+## MQTT and HASS.Agent
+
+HASS.Agent on the Windows PC talks to Home Assistant in two ways: the HA API
+(for notifications and quick actions) and MQTT (for its sensors and commands).
+Compose runs an authenticated `mosquitto` broker for the MQTT side. It publishes
+port `1883` on all interfaces so the PC can reach it over the LAN; Home
+Assistant, on the host network, reaches it at `127.0.0.1:1883`.
+
+The broker's password file is generated from `MQTT_HA_*` and `MQTT_AGENT_*`
+stack variables on every container start. Nothing credential-bearing is
+committed or persisted. Retained messages, including HASS.Agent's discovery
+configs, persist in `data/mosquitto/data`.
+
+1. Set `MQTT_HA_PASSWORD` and `MQTT_AGENT_PASSWORD` in the Portainer stack and
+   redeploy. Confirm `mosquitto` reports healthy.
+2. In Home Assistant, open **Settings -> Devices & services -> Add integration
+   -> MQTT**. Use broker `127.0.0.1`, port `1883`, and the `MQTT_HA_*`
+   credentials. Leave the discovery prefix as `homeassistant`.
+3. On the PC, open **HASS.Agent -> Configuration -> MQTT**. Set the broker to
+   the homelab host's LAN IP, port `1883`, the `MQTT_AGENT_*` credentials,
+   TLS off, and discovery prefix `homeassistant`. Save and restart the
+   HASS.Agent service when prompted.
+4. Configure the Home Assistant API section of HASS.Agent with the HA URL and
+   a long-lived token dedicated to that PC. Do not reuse `HA_LONG_LIVED_TOKEN`.
+5. Add a sensor in HASS.Agent and confirm a device for the PC appears under
+   the MQTT integration.
+
+The broker uses plain MQTT on 1883. That is acceptable on the apartment LAN or
+the WireGuard mesh. Do not port-forward it to the internet.
+
 ## Verification and persistence
 
 For each integration:
