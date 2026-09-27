@@ -130,6 +130,13 @@ configs, persist in `data/mosquitto/data`.
    a long-lived token dedicated to that PC. Do not reuse `HA_LONG_LIVED_TOKEN`.
 5. Add a sensor in HASS.Agent and confirm a device for the PC appears under
    the MQTT integration.
+6. For notifications and the PC media player, add the **HASS.Agent**
+   integration in **Settings -> Devices & services**. Compose installs
+   [`hass-agent/HASS.Agent-Integration`](https://github.com/hass-agent/HASS.Agent-Integration)
+   into the runtime `custom_components` mount, pinned by release tag and
+   commit, so HACS is not required. Confirm `hass-agent-installer` reports
+   version `2.1.2` and exits successfully. HA usually discovers the PC
+   through MQTT; otherwise add it manually and select the PC's device.
 
 The broker uses plain MQTT on 1883. That is acceptable on the apartment LAN or
 the WireGuard mesh. Do not port-forward it to the internet.

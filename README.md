@@ -27,6 +27,7 @@ homeassistant/              Git-tracked Home Assistant configuration
   www/briefing/              Briefing audio published here at runtime (gitignored)
 services/
   briefing/                  xAI (Grok) LLM + TTS microservice for the morning briefing
+  hass-agent-installer/       Pinned HASS.Agent companion-integration installer
   healthsync-installer/       Pinned HealthSync custom-integration installer
   localtuya-installer/        Pinned LocalTuya custom-integration installer
   mira-home-mcp/              Read-only semantic Home Assistant tools for Mira

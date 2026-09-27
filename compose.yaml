@@ -83,6 +83,20 @@ services:
     volumes:
       - ./data/homeassistant/custom_components:/custom_components
 
+  # HASS.Agent's companion integration (notifications and media player for
+  # the Windows PC over MQTT). Pinned by release tag and commit rather than a
+  # tarball checksum; see the Dockerfile.
+  hass-agent-installer:
+    build:
+      context: ./services/hass-agent-installer
+      args:
+        HASS_AGENT_VERSION: "2.1.2"
+        HASS_AGENT_COMMIT: "5dcc02adddeeef220c6fcd8777d102ca4983bd9e"
+    container_name: hass-agent-installer
+    restart: "no"
+    volumes:
+      - ./data/homeassistant/custom_components:/custom_components
+
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:2026.9.3
     container_name: homeassistant
@@ -113,6 +127,8 @@ services:
       retries: 5
       start_period: 120s
     depends_on:
+      hass-agent-installer:
+        condition: service_completed_successfully
       healthsync-installer:
         condition: service_completed_successfully
       localtuya-installer:
