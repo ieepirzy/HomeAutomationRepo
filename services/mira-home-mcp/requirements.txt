@@ -1,4 +1,4 @@
-fastmcp==3.4.6
+fastmcp==3.4.10
 fastapi==0.141.1
 httpx==0.28.1
 IMAPClient==3.1.0
